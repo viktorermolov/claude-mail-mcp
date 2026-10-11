@@ -2,6 +2,28 @@
 
 All notable changes are documented here. This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.3.0] — fork: safe IMAP-only connector
+
+### Removed
+- `send_message`, the SMTP client and SMTP credentials. Drafts are composed locally with nodemailer's MailComposer (no transport) and APPENDed to Drafts.
+- Calendar tools and CalDAV support (`tsdav`, `ical.js`).
+- `delete_message`, which set `\Deleted` + EXPUNGE (permanent on iCloud).
+- Static Bearer `AUTH_TOKEN` auth and the pm2 ecosystem file.
+
+### Added
+- `move_to_trash` (moves to the `\Trash` special-use folder or `mail.trashFolder`) and `set_flagged`.
+- Cloudflare Access JWT validation (`Cf-Access-Jwt-Assertion`: signature, issuer, audience, expiry, e-mail allow-list). OAuth 2.1 is provided by Access Managed OAuth.
+- MCP tool annotations; tests for the tool set, auth and the no-send / no-expunge guarantees.
+- Hardened systemd unit and Cloudflare Tunnel templates in `deploy/`.
+
+### Changed
+- `move_message` refuses servers without IMAP `MOVE` instead of falling back to COPY + EXPUNGE.
+- Read tools open folders with EXAMINE, so reading never changes flags.
+- A fresh MCP server per request (stateless mode) — concurrent requests no longer share one transport.
+- `/health` returns only `{"status":"ok"}`; logs carry no addresses or error text from mail servers.
+- `accounts.json` parse errors no longer echo file contents.
+- Dependencies updated (`@modelcontextprotocol/sdk`, `nodemailer`, `imapflow`, `mailparser`); `npm audit` clean.
+
 ## [0.2.1] — 2026-05-21
 
 Security hardening pass. No new features; no breaking API changes.

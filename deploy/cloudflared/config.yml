@@ -1,0 +1,11 @@
+# /etc/cloudflared/mail-mcp.yml — locally-managed tunnel for claude-mail-mcp.
+# Only the MCP endpoint is routed; everything else gets 404 at the edge.
+tunnel: TUNNEL_UUID
+credentials-file: /etc/cloudflared/TUNNEL_UUID.json
+no-autoupdate: true
+
+ingress:
+  - hostname: MAIL_HOSTNAME
+    path: ^/mcp$
+    service: http://127.0.0.1:3220
+  - service: http_status:404

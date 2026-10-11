@@ -1,33 +1,32 @@
 /**
  * Accounts store — multi-account credential management.
  *
- * Replaces the single-account .env approach from v0.1. Accounts live in a
- * JSON file (default: /root/.config/mail-mcp/accounts.json) that is written
- * by the OAuth shim's /settings UI. The backend reads the file on startup
- * and re-reads it whenever the file changes (fs.watch), so credentials can
- * be added or rotated without restarting the server.
+ * Accounts live in a JSON file (ACCOUNTS_FILE) that the operator writes by
+ * hand. The server reads it on startup and re-reads it whenever the file
+ * changes (fs.watch), so credentials can be rotated without a restart.
+ *
+ * This fork is IMAP-only: there are no SMTP or CalDAV credentials, so the
+ * server has no way to send mail even if a tool asked it to.
  *
  * File format (version 1):
  *   {
  *     "version": 1,
  *     "accounts": [
  *       {
- *         "id": "work",
- *         "label": "Work (markusstoeger.com)",
+ *         "id": "icloud",
+ *         "label": "iCloud",
  *         "default": true,
- *         "imap": { "host": "...", "port": 993, "user": "...", "pass": "...", "tls": true },
- *         "smtp": { "host": "...", "port": 465, "user": "...", "pass": "...", "tls": true },
- *         "mail": { "defaultFrom": "...", "defaultFromName": "", "draftsFolder": "Drafts", "sentFolder": "Sent" },
- *         "caldav": { "url": "...", "user": "...", "pass": "..." }   // optional
+ *         "imap": { "host": "imap.mail.me.com", "port": 993, "user": "...", "pass": "...", "tls": true },
+ *         "mail": { "defaultFrom": "...", "draftsFolder": "Drafts", "trashFolder": "Deleted Messages" }
  *       }
  *     ]
  *   }
  *
- * Storage security: the file is expected to be chmod 600 and live on a
- * partition the systemd unit's ProtectSystem= can write to. No app-level
- * encryption — filesystem perms + systemd hardening are the security
- * boundary. (This matches how SSH keys, GPG keys and most service-credential
- * files are handled.)
+ * Unknown keys (e.g. a leftover "smtp" block) are ignored.
+ *
+ * Storage security: the file must be readable only by the service user
+ * (chmod 600). No app-level encryption — filesystem perms + systemd
+ * hardening are the security boundary.
  */
 
 import { promises as fs } from "node:fs";
@@ -42,25 +41,12 @@ export interface ImapCreds {
   tls: boolean;
 }
 
-export interface SmtpCreds {
-  host: string;
-  port: number;
-  user: string;
-  pass: string;
-  tls: boolean;
-}
-
-export interface CalDavCreds {
-  url: string;
-  user: string;
-  pass: string;
-}
-
 export interface MailDefaults {
   defaultFrom: string;
   defaultFromName?: string;
   draftsFolder: string;
-  sentFolder: string | null;
+  /** Explicit Trash folder; when omitted the \Trash special-use folder is used. */
+  trashFolder?: string;
 }
 
 export interface Account {
@@ -68,9 +54,7 @@ export interface Account {
   label: string;
   default?: boolean;
   imap: ImapCreds;
-  smtp: SmtpCreds;
   mail: MailDefaults;
-  caldav?: CalDavCreds;
 }
 
 export interface AccountsFile {
@@ -91,7 +75,7 @@ export class NoSuchAccountError extends Error {
   constructor(public readonly accountId: string, availableIds: string[]) {
     super(
       availableIds.length === 0
-        ? `No mailbox accounts configured yet. Open the setup page at the connector's /settings URL to add one.`
+        ? `No mailbox accounts configured yet. The operator has to fill in accounts.json on the server.`
         : `Account "${accountId}" is not configured. Available: ${availableIds.join(", ")}.`
     );
     this.name = "NoSuchAccountError";
@@ -110,18 +94,12 @@ export class AccountsStore {
   }
 
   /**
-   * Initial load from disk. Returns the loaded accounts list (which may be
-   * empty if the file doesn't exist yet — that's a valid "first run" state).
-   * Then starts watching the file for changes.
+   * Initial load from disk (a missing file is a valid "first run" state),
+   * then start watching the file for changes.
    */
   async start(onChange?: (next: Account[], prev: Account[]) => void): Promise<void> {
     this.onChange = onChange;
     await this.reload();
-    try {
-      await fs.mkdir(path.dirname(this.filePath), { recursive: true });
-    } catch {
-      // Best-effort; reload would have already failed for permission issues.
-    }
     this.watchFile();
   }
 
@@ -196,17 +174,13 @@ export class AccountsStore {
     id: string;
     label: string;
     default: boolean;
-    smtp_from: string;
-    imap_host: string;
-    caldav_enabled: boolean;
+    address: string;
   }> {
     return this.accounts.map((a) => ({
       id: a.id,
       label: a.label,
       default: Boolean(a.default),
-      smtp_from: a.mail.defaultFrom,
-      imap_host: a.imap.host,
-      caldav_enabled: Boolean(a.caldav?.url),
+      address: a.mail.defaultFrom,
     }));
   }
 
@@ -225,7 +199,8 @@ export class AccountsStore {
         pending = setTimeout(() => {
           this.reload().catch((err) => {
             // Don't crash the server on a malformed save; just keep the old
-            // accounts in memory.
+            // accounts in memory. The message never contains the password:
+            // parse errors name the field, not its value.
             console.error(
               JSON.stringify({
                 ts: new Date().toISOString(),
@@ -250,21 +225,21 @@ export class AccountsStore {
   }
 }
 
-function parseAccountsFile(raw: string): AccountsFile {
+export function parseAccountsFile(raw: string): AccountsFile {
   let json: unknown;
   try {
     json = JSON.parse(raw);
-  } catch (err) {
-    throw new AccountsStoreError(
-      `accounts.json is not valid JSON: ${err instanceof Error ? err.message : err}`
-    );
+  } catch {
+    // Don't echo the parser message: it can quote a fragment of the file,
+    // which may include the password.
+    throw new AccountsStoreError("accounts.json is not valid JSON");
   }
   if (!json || typeof json !== "object") {
     throw new AccountsStoreError("accounts.json must be a JSON object");
   }
   const obj = json as { version?: unknown; accounts?: unknown };
   if (obj.version !== 1) {
-    throw new AccountsStoreError(`Unsupported accounts.json version: ${obj.version}. Expected 1.`);
+    throw new AccountsStoreError(`Unsupported accounts.json version. Expected 1.`);
   }
   if (!Array.isArray(obj.accounts)) {
     throw new AccountsStoreError("accounts.json must have an `accounts` array");
@@ -296,27 +271,11 @@ function parseAccount(raw: unknown, index: number): Account {
     label: expectStr(a.label, `accounts[${index}].label`),
     default: a.default === true ? true : undefined,
     imap: parseImap(a.imap, `accounts[${index}].imap`),
-    smtp: parseSmtp(a.smtp, `accounts[${index}].smtp`),
     mail: parseMail(a.mail, `accounts[${index}].mail`),
-    caldav: a.caldav ? parseCalDav(a.caldav, `accounts[${index}].caldav`) : undefined,
   };
 }
 
 function parseImap(raw: unknown, where: string): ImapCreds {
-  if (!raw || typeof raw !== "object") {
-    throw new AccountsStoreError(`${where} must be an object`);
-  }
-  const o = raw as Record<string, unknown>;
-  return {
-    host: expectStr(o.host, `${where}.host`),
-    port: expectInt(o.port, `${where}.port`),
-    user: expectStr(o.user, `${where}.user`),
-    pass: expectStr(o.pass, `${where}.pass`),
-    tls: typeof o.tls === "boolean" ? o.tls : true,
-  };
-}
-
-function parseSmtp(raw: unknown, where: string): SmtpCreds {
   if (!raw || typeof raw !== "object") {
     throw new AccountsStoreError(`${where} must be an object`);
   }
@@ -335,30 +294,11 @@ function parseMail(raw: unknown, where: string): MailDefaults {
     throw new AccountsStoreError(`${where} must be an object`);
   }
   const o = raw as Record<string, unknown>;
-  const sentRaw = o.sentFolder;
-  const sentFolder =
-    sentRaw === null || sentRaw === ""
-      ? null
-      : typeof sentRaw === "string"
-        ? sentRaw
-        : "Sent";
   return {
     defaultFrom: expectStr(o.defaultFrom, `${where}.defaultFrom`),
     defaultFromName: typeof o.defaultFromName === "string" ? o.defaultFromName : undefined,
     draftsFolder: typeof o.draftsFolder === "string" && o.draftsFolder.length > 0 ? o.draftsFolder : "Drafts",
-    sentFolder,
-  };
-}
-
-function parseCalDav(raw: unknown, where: string): CalDavCreds {
-  if (!raw || typeof raw !== "object") {
-    throw new AccountsStoreError(`${where} must be an object`);
-  }
-  const o = raw as Record<string, unknown>;
-  return {
-    url: expectStr(o.url, `${where}.url`),
-    user: expectStr(o.user, `${where}.user`),
-    pass: expectStr(o.pass, `${where}.pass`),
+    trashFolder: typeof o.trashFolder === "string" && o.trashFolder.length > 0 ? o.trashFolder : undefined,
   };
 }
 

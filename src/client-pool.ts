@@ -1,23 +1,21 @@
 /**
  * Per-account client pool.
  *
- * Holds one ImapClient + SmtpClient (+ optional CalDavClient) per account,
- * lazy-initialized on first use. When accounts.json changes the entire pool
- * is dropped and rebuilt on next request — simpler than diffing per-field
- * credential changes, and IMAP reconnects are cheap (~one TLS handshake).
+ * Holds one ImapClient per account, lazy-initialized on first use. When
+ * accounts.json changes the entire pool is dropped and rebuilt on next
+ * request — simpler than diffing per-field credential changes, and IMAP
+ * reconnects are cheap (~one TLS handshake).
  */
 
 import { ImapClient } from "./imap-client.js";
-import { SmtpClient } from "./smtp-client.js";
-import { CalDavClient } from "./caldav-client.js";
 import { Account, AccountsStore } from "./accounts.js";
+import { DraftSender } from "./draft-composer.js";
 
 interface AccountClients {
   imap: ImapClient;
-  smtp: SmtpClient;
-  caldav: CalDavClient | null;
+  sender: DraftSender;
   draftsFolder: string;
-  sentFolder: string | null;
+  trashFolder?: string;
 }
 
 export class ClientPool {
@@ -30,7 +28,7 @@ export class ClientPool {
 
   /**
    * Resolve the requested account ID (or default if omitted) and return its
-   * client trio. Lazy-initializes the underlying connections on first use.
+   * clients. Lazy-initializes the underlying connection on first use.
    */
   for(accountId?: string): AccountClients {
     const account = this.store.resolve(accountId);
@@ -64,32 +62,14 @@ export class ClientPool {
       pass: account.imap.pass,
       secure: account.imap.tls,
     });
-    const smtp = new SmtpClient(
-      {
-        host: account.smtp.host,
-        port: account.smtp.port,
-        user: account.smtp.user,
-        pass: account.smtp.pass,
-        secure: account.smtp.tls,
-      },
-      {
-        from: account.mail.defaultFrom,
-        fromName: account.mail.defaultFromName || undefined,
-      }
-    );
-    const caldav = account.caldav
-      ? new CalDavClient({
-          url: account.caldav.url,
-          user: account.caldav.user,
-          pass: account.caldav.pass,
-        })
-      : null;
     return {
       imap,
-      smtp,
-      caldav,
+      sender: {
+        from: account.mail.defaultFrom,
+        fromName: account.mail.defaultFromName || undefined,
+      },
       draftsFolder: account.mail.draftsFolder,
-      sentFolder: account.mail.sentFolder,
+      trashFolder: account.mail.trashFolder,
     };
   }
 }
