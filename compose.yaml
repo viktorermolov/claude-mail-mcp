@@ -7,7 +7,11 @@
 
 services:
   mail-mcp:
-    build: .
+    build:
+      context: .
+      # Build steps use the host's resolver (some hosts only have IPv6 DNS
+      # upstreams, which the default build network cannot reach).
+      network: host
     image: claude-mail-mcp:local
     # Host user that owns ./secrets (see docs/DEPLOYMENT.md).
     user: "${MAILMCP_UID:?set MAILMCP_UID in .env}:${MAILMCP_GID:?set MAILMCP_GID in .env}"
