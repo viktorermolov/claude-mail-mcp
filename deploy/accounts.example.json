@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "accounts": [
+    {
+      "id": "icloud",
+      "label": "iCloud",
+      "default": true,
+      "imap": {
+        "host": "imap.mail.me.com",
+        "port": 993,
+        "user": "YOUR_APPLE_ID_EMAIL",
+        "pass": "xxxx-xxxx-xxxx-xxxx",
+        "tls": true
+      },
+      "mail": {
+        "defaultFrom": "you@icloud.com",
+        "draftsFolder": "Drafts",
+        "trashFolder": "Deleted Messages"
+      }
+    }
+  ]
+}

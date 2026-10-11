@@ -1,0 +1,29 @@
+name: CI
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npm test
+      - run: npm audit --omit=dev --audit-level=moderate
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t claude-mail-mcp:ci .
+      - name: image runs as non-root and has no shell
+        run: |
+          test "$(docker image inspect -f '{{.Config.User}}' claude-mail-mcp:ci)" = "nonroot"
+          ! docker run --rm --entrypoint /bin/sh claude-mail-mcp:ci -c true

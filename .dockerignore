@@ -1,0 +1,10 @@
+.git
+.github
+node_modules
+dist
+test
+docs
+.env
+secrets
+cloudflared
+*.md

@@ -1,8 +1,8 @@
 /**
  * Environment configuration loader.
  *
- * In v0.2, only transport-level settings live here (port, auth token,
- * accounts file path, log level). Mailbox credentials moved to
+ * Only transport-level settings live here (bind address, Cloudflare Access
+ * parameters, accounts file path, log level). Mailbox credentials live in
  * accounts.json — see src/accounts.ts and README.md.
  */
 
@@ -13,12 +13,12 @@ function required(name: string): string {
       `Missing required environment variable: ${name}. See .env.example.`
     );
   }
-  return value;
+  return value.trim();
 }
 
 function optional(name: string, fallback: string): string {
   const value = process.env[name];
-  return value && value.trim() !== "" ? value : fallback;
+  return value && value.trim() !== "" ? value.trim() : fallback;
 }
 
 function int(name: string, fallback: number): number {
@@ -31,13 +31,18 @@ function int(name: string, fallback: number): number {
   return parsed;
 }
 
+function list(name: string): string[] {
+  return required(name)
+    .split(",")
+    .map((v) => v.trim())
+    .filter(Boolean);
+}
+
 export const config = {
   port: int("PORT", 3220),
   /**
-   * Interface to bind. Default 127.0.0.1 (loopback only) — the public
-   * hostname is terminated by nginx/Caddy upstream. Set to 0.0.0.0 only
-   * if you really want the process directly internet-reachable, in which
-   * case you're on your own re. TLS, rate-limiting, etc.
+   * Interface to bind. Keep the default 127.0.0.1: the only way in is the
+   * local cloudflared connector.
    */
   host: optional("HOST", "127.0.0.1"),
   logLevel: optional("LOG_LEVEL", "info") as
@@ -46,23 +51,15 @@ export const config = {
     | "warn"
     | "error",
 
-  /**
-   * Path to the multi-account credentials file managed by the OAuth shim's
-   * /settings UI. Default suits the published deployment recipe; OSS users
-   * can override.
-   */
-  accountsFile: optional(
-    "ACCOUNTS_FILE",
-    "/root/.config/mail-mcp/accounts.json"
-  ),
+  /** Path to the accounts file (chmod 600, owned by the service user). */
+  accountsFile: required("ACCOUNTS_FILE"),
 
-  /**
-   * Bearer token a client must present in the Authorization header when
-   * calling /mcp. The OAuth shim injects this on behalf of the user after
-   * verifying their token.
-   */
-  authToken: required("AUTH_TOKEN"),
-  publicUrl: optional("PUBLIC_URL", "http://localhost:3220"),
+  /** Cloudflare Zero Trust team domain, e.g. "myteam.cloudflareaccess.com". */
+  accessTeamDomain: required("CF_ACCESS_TEAM_DOMAIN"),
+  /** Application Audience (AUD) tag of the Access application. */
+  accessAudience: required("CF_ACCESS_AUD"),
+  /** Comma-separated e-mail addresses allowed to use the connector. */
+  allowedEmails: list("ALLOWED_EMAILS"),
 } as const;
 
 export type Config = typeof config;

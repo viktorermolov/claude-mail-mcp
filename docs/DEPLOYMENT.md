@@ -1,232 +1,82 @@
-# Deployment
+# Deployment: Docker Compose + Cloudflare Tunnel + Access Managed OAuth
 
-A typical production deployment behind nginx with pm2 as the process manager. Adapt to your stack as needed.
+```
+claude.ai ──HTTPS──▶ Cloudflare edge
+                      ├─ Access app (Managed OAuth: DCR + PKCE + login policy)
+                      └─ Tunnel ──▶ cloudflared container ──(compose network)──▶ mail-mcp container
+                                                                                  └─▶ imap.mail.me.com:993
+```
 
-## Requirements
+No ports are published on the host and none are opened on the router; no nginx or Let's Encrypt is needed.
 
-- Node.js ≥ 20
-- A public DNS name pointing at your server (HTTPS is required by Claude.ai)
-- An IMAP + SMTP capable mailbox
-- Optionally a CalDAV endpoint
+## 1. Host user and checkout
 
-## 1. Clone and build
+The container runs as a dedicated unprivileged host user, so the credentials file can be readable by that user only.
 
 ```bash
-cd /var/www
-git clone https://github.com/maxx3250/claude-mail-mcp.git mail-mcp
-cd mail-mcp
-npm ci
-npm run build
+sudo useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin mailmcp
+git clone https://github.com/<you>/claude-mail-mcp.git && cd claude-mail-mcp
+cp .env.example .env          # fill in MAILMCP_UID/GID (id mailmcp), Access values, ALLOWED_EMAILS
 ```
 
-## 2. Configure
+## 2. Credentials
 
 ```bash
-cp .env.example .env
-# generate the Bearer token clients will send to /mcp
-echo "AUTH_TOKEN=$(openssl rand -hex 32)" >> .env
-# edit .env and fill in IMAP_*, SMTP_*, DEFAULT_FROM, PUBLIC_URL, and optionally CALDAV_*
+sudo install -d -o mailmcp -g mailmcp -m 700 secrets
+sudo install -o mailmcp -g mailmcp -m 600 deploy/accounts.example.json secrets/accounts.json
+sudoedit secrets/accounts.json   # put the app-specific password into imap.pass
 ```
 
-For two-factor mailboxes (Gmail, iCloud, Fastmail) use an **app-specific password**, never your main account password. See the table in the [README](../README.md#app-passwords-mandatory-on-2fa-accounts) for direct links.
+`secrets/` is git-ignored and mounted read-only into the container. The server hot-reloads the file on change.
 
-## 3. Create the dedicated service user
+## 3. Start the server
 
 ```bash
-useradd --system --no-create-home --shell /usr/sbin/nologin --comment "claude-mail-mcp" mailmcp
-mkdir -p /var/lib/mail-mcp/oauth-state
-chown -R mailmcp:mailmcp /var/lib/mail-mcp
-chmod 700 /var/lib/mail-mcp /var/lib/mail-mcp/oauth-state
-chgrp mailmcp /var/www/mail-mcp/.env
-chmod 640 /var/www/mail-mcp/.env
+docker compose up -d --build
+docker compose ps                # mail-mcp: healthy
 ```
 
-If you use an htpasswd file for the bundled OAuth shim, give the shim's user group-read access:
+The container has a read-only root filesystem, drops all capabilities, runs with `no-new-privileges`, and the runtime image (distroless) has no shell.
+
+## 4. Cloudflare Tunnel (locally managed)
 
 ```bash
-chgrp mailmcp /etc/nginx/.htpasswd_mail
-chmod 640 /etc/nginx/.htpasswd_mail
+cloudflared tunnel login                       # once, opens a browser
+cloudflared tunnel create mail-mcp
+cloudflared tunnel route dns mail-mcp mail.example.com
 ```
 
-## 4. Run via hardened systemd unit
-
-`/etc/systemd/system/claude-mail-mcp.service`:
-
-```ini
-[Unit]
-Description=claude-mail-mcp — IMAP/SMTP/CalDAV MCP backend
-After=network.target
-Wants=network.target
-
-[Service]
-Type=simple
-User=mailmcp
-Group=mailmcp
-WorkingDirectory=/var/www/mail-mcp
-Environment=NODE_ENV=production
-ExecStart=/usr/bin/node --env-file=/var/www/mail-mcp/.env --enable-source-maps /var/www/mail-mcp/dist/index.js
-Restart=on-failure
-RestartSec=5
-StandardOutput=journal
-StandardError=journal
-
-# Hardening
-NoNewPrivileges=true
-ProtectSystem=strict
-ProtectHome=true
-PrivateTmp=true
-PrivateDevices=true
-ProtectKernelTunables=true
-ProtectKernelModules=true
-ProtectKernelLogs=true
-ProtectControlGroups=true
-ProtectClock=true
-ProtectHostname=true
-ProtectProc=invisible
-RestrictSUIDSGID=true
-RestrictNamespaces=true
-RestrictRealtime=true
-LockPersonality=true
-SystemCallArchitectures=native
-SystemCallFilter=@system-service
-SystemCallFilter=~@privileged @resources
-ReadWritePaths=/var/lib/mail-mcp
-MemoryMax=512M
-TasksMax=128
-LimitNOFILE=4096
-RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
-
-[Install]
-WantedBy=multi-user.target
-```
+Put `deploy/cloudflared/config.yml` (UUID and hostname filled in) and the tunnel credentials JSON into `./cloudflared/`. The credentials file must be readable by the cloudflared image's user (uid 65532) only:
 
 ```bash
-systemctl daemon-reload
-systemctl enable --now claude-mail-mcp.service
-systemctl status claude-mail-mcp.service
-journalctl -u claude-mail-mcp.service -f
+sudo chown -R 65532:65532 cloudflared && sudo chmod 700 cloudflared && sudo chmod 600 cloudflared/*.json
 ```
 
-### Alternative: pm2 (local dev only)
+Only `/mcp` is routed to the server; every other path returns 404 at the edge.
 
-The repo ships `ecosystem.config.cjs` for `pm2 start ecosystem.config.cjs`. Not recommended for production — pm2 runs as the invoking user (typically root) and provides none of the systemd isolation above.
+## 5. Cloudflare Access with Managed OAuth
 
-## 5. Reverse proxy (nginx)
+Zero Trust → Access controls → Applications → Add → **Self-hosted**:
 
-```nginx
-server {
-    listen 80;
-    server_name mcp-mail.example.com;
-    return 301 https://$host$request_uri;
-}
+- Domain: `mail.example.com`
+- Policy: **Allow**, Include → Emails → your address (nothing else)
+- Login method: One-time PIN or an identity provider you already use
+- Advanced settings → **Managed OAuth**: on
+  - Allowed redirect URIs: `https://claude.ai/api/mcp/auth_callback`, `https://claude.com/api/mcp/auth_callback`
+  - Localhost / loopback clients: off
+  - Access token lifetime: 15 min; grant session duration: as you like (e.g. 30 days)
 
-server {
-    listen 443 ssl http2;
-    server_name mcp-mail.example.com;
-
-    ssl_certificate     /etc/letsencrypt/live/mcp-mail.example.com/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/mcp-mail.example.com/privkey.pem;
-
-    server_tokens off;
-
-    # Streamable HTTP can keep connections open longer than the nginx default
-    proxy_read_timeout 600s;
-    proxy_send_timeout 600s;
-    proxy_buffering    off;
-
-    # Email bodies and attachments can be large
-    client_max_body_size 25M;
-
-    location / {
-        proxy_pass http://127.0.0.1:3220;
-        proxy_http_version 1.1;
-        proxy_set_header Host              $host;
-        proxy_set_header X-Real-IP         $remote_addr;
-        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_set_header Authorization     $http_authorization;
-        proxy_set_header Transfer-Encoding "";
-    }
-}
-```
+Copy the application's **AUD tag** into `CF_ACCESS_AUD` and your team domain into `CF_ACCESS_TEAM_DOMAIN` in `.env`, then:
 
 ```bash
-certbot --nginx -d mcp-mail.example.com
+docker compose --profile tunnel up -d
 ```
 
-## 6. Add to Claude
-
-### Option A — Claude Desktop (Bearer auth, simplest)
-
-1. Open **Claude Desktop → Settings → Developer → Edit Config**
-2. Add an entry:
-   ```json
-   {
-     "mcpServers": {
-       "mail": {
-         "url": "https://mcp-mail.example.com/mcp",
-         "transport": "http",
-         "headers": { "Authorization": "Bearer YOUR_AUTH_TOKEN" }
-       }
-     }
-   }
-   ```
-3. Restart Claude Desktop. The mail and (optionally) calendar tools appear under "mail".
-
-### Option B — claude.ai web (OAuth 2.1 + DCR)
-
-claude.ai will only connect to remote MCP servers that advertise OAuth 2.1 discovery. To support that, run a thin OAuth shim in front of the connector. A reference implementation lives at <https://github.com/markusstoeger/mcp-oauth-shim>.
-
-The shim:
-- Implements `/.well-known/oauth-authorization-server`, `/authorize`, `/token`, `/register`, `/jwks.json`
-- Validates Claude's PKCE flow + DCR registration
-- Forwards `/mcp` traffic to the connector with the upstream Bearer header injected
-- Authenticates the human in `/authorize` against an htpasswd file
-
-When the shim is in front:
-
-1. claude.ai → **Settings → Connectors → Add custom connector**
-2. URL: `https://mcp-mail.example.com/mcp` (the shim's public URL)
-3. claude.ai discovers the OAuth endpoints automatically
-4. A login popup asks for the htpasswd user/password
-5. The tools appear in the connector
-
-## 7. Verify
+## 6. Verify
 
 ```bash
-# health
-curl https://mcp-mail.example.com/health
-# → {"status":"ok",…,"caldav_enabled":true}
-
-# unauthenticated request should be rejected
-curl -i -X POST https://mcp-mail.example.com/mcp -H 'Content-Type: application/json' -d '{}'
-# → HTTP/1.1 401 Unauthorized
-
-# tools/list with auth
-curl -X POST https://mcp-mail.example.com/mcp \
-  -H "Authorization: Bearer $AUTH_TOKEN" \
-  -H "Content-Type: application/json" \
-  -H "Accept: application/json, text/event-stream" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
-# → JSON with 9 or 13 tools (depending on whether CALDAV_URL is set)
+# Through the tunnel without logging in: Access refuses
+curl -s -o /dev/null -w '%{http_code}\n' -X POST https://mail.example.com/mcp   # 401/403
 ```
 
-## 8. Updating
-
-```bash
-cd /var/www/mail-mcp
-git pull
-npm ci
-npm run build
-systemctl restart claude-mail-mcp.service
-```
-
-## 9. Operational notes
-
-**Credentials.** Rotate `AUTH_TOKEN` periodically. If you use an app-specific password (Gmail, iCloud, Fastmail), revoke it from the provider's UI when the connector is decommissioned.
-
-**Backup.** The service is stateless. Just keep `.env` safe.
-
-**Monitoring.** Hit `/health` from your uptime checker. Alert on non-200 responses or pm2 restart loops. The endpoint also reports `caldav_enabled` so you can detect misconfiguration.
-
-**Connection idle.** The IMAP connection auto-reconnects on demand. If your provider closes idle connections aggressively (some do after 10 minutes), the next tool call simply reopens the socket.
+Then in claude.ai: Settings → Connectors → Add custom connector → `https://mail.example.com/mcp`. The OAuth login opens the Access page; after login the ten tools appear.

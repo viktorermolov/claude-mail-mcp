@@ -8,3 +8,11 @@ dist/
 .vscode/
 coverage/
 *.tsbuildinfo
+
+# Real credentials never belong in the repo
+accounts.json
+*.credentials.json
+
+# Local deployment state
+secrets/
+cloudflared/
