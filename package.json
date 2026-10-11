@@ -1,9 +1,9 @@
 {
   "name": "claude-mail-mcp",
   "version": "0.3.0",
-  "description": "Self-hosted IMAP-only MCP connector for Claude: read, search, drafts, move, flags, trash — no sending, no expunge. Auth via Cloudflare Access Managed OAuth.",
+  "description": "Self-hosted IMAP-only MCP connector for Claude: read, search, drafts, move, flags, trash \u2014 no sending, no expunge. Auth via Cloudflare Access Managed OAuth.",
   "license": "MIT",
-  "author": "Markus Stöger <hi@markusstoeger.com> (https://markusstoeger.com)",
+  "author": "Markus St\u00f6ger <hi@markusstoeger.com> (https://markusstoeger.com)",
   "homepage": "https://markusstoeger.com/repos#claude-mail-mcp",
   "repository": {
     "type": "git",
@@ -32,7 +32,9 @@
     "README.md",
     "LICENSE",
     ".env.example",
-    "deploy"
+    "deploy",
+    "Dockerfile",
+    "compose.yaml"
   ],
   "scripts": {
     "build": "tsc",

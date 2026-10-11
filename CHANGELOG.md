@@ -14,7 +14,7 @@ All notable changes are documented here. This project follows [Semantic Versioni
 - `move_to_trash` (moves to the `\Trash` special-use folder or `mail.trashFolder`) and `set_flagged`.
 - Cloudflare Access JWT validation (`Cf-Access-Jwt-Assertion`: signature, issuer, audience, expiry, e-mail allow-list). OAuth 2.1 is provided by Access Managed OAuth.
 - MCP tool annotations; tests for the tool set, auth and the no-send / no-expunge guarantees.
-- Hardened systemd unit and Cloudflare Tunnel templates in `deploy/`.
+- `Dockerfile` (distroless, non-root) and `compose.yaml` with a cloudflared sidecar; no published ports, read-only root FS, all capabilities dropped.
 
 ### Changed
 - `move_message` refuses servers without IMAP `MOVE` instead of falling back to COPY + EXPUNGE.

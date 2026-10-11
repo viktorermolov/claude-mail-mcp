@@ -31,16 +31,16 @@ Read tools open the folder with `EXAMINE`, so reading never marks mail as read. 
 
 ## Authentication
 
-The server listens on `127.0.0.1` only and is published through a **Cloudflare Tunnel**. The tunnel hostname is a self-hosted **Cloudflare Access** application with **Managed OAuth** enabled: Access acts as the OAuth 2.1 authorization server (discovery, dynamic client registration, PKCE) that claude.ai's custom connector expects, and only identities allowed by the Access policy can finish the login.
+The server runs in a container with no published ports and is reachable only through a **Cloudflare Tunnel** (cloudflared runs as a second container on the same compose network). The tunnel hostname is a self-hosted **Cloudflare Access** application with **Managed OAuth** enabled: Access acts as the OAuth 2.1 authorization server (discovery, dynamic client registration, PKCE) that claude.ai's custom connector expects, and only identities allowed by the Access policy can finish the login.
 
 The server validates every request's `Cf-Access-Jwt-Assertion` header itself — signature against the team's public keys, issuer, application audience, expiry, and an e-mail allow-list. A request without a valid Access JWT gets `401`, even if it reaches the origin some other way. There is no shared static token.
 
 ## Configuration
 
-- `.env.example` — bind address, Access team domain + AUD tag, allowed e-mails.
-- `deploy/accounts.example.json` — mailbox credentials (keep the real file `chmod 600`, owned by the service user, outside the repo).
+- `.env.example` — service user uid/gid, Access team domain + AUD tag, allowed e-mails.
+- `deploy/accounts.example.json` — template for `secrets/accounts.json` (git-ignored, `chmod 600`, owned by the service user).
 
-Deployment on a Raspberry Pi with systemd and a locally-managed tunnel: [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
+Deployment with Docker Compose and a locally-managed tunnel: [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 
 ## Development
 
