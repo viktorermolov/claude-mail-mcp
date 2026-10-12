@@ -1,12 +1,12 @@
 # claude-mail-mcp (safe IMAP fork)
 
-Self-hosted **IMAP connector for Claude**: a Streamable HTTP MCP server that lets [Claude.ai](https://claude.ai) read and organise a mailbox — and nothing more. Fork of [maxx3250/claude-mail-mcp](https://github.com/maxx3250/claude-mail-mcp) cut down for personal use with iCloud Mail.
+Self-hosted **IMAP connector for Claude**: a Streamable HTTP MCP server that lets [Claude.ai](https://claude.ai) read and organise a mailbox and read (only read) the calendars — and nothing more. Fork of [maxx3250/claude-mail-mcp](https://github.com/maxx3250/claude-mail-mcp) cut down for personal use with iCloud Mail.
 
 What this fork deliberately **cannot** do:
 
 - **Send mail.** There is no send tool and no SMTP code or SMTP credentials. Replies are written as drafts; you send them from your own mail client.
 - **Permanently delete.** "Delete" moves a message to Trash; nothing can remove a message from Trash, and a plain `EXPUNGE` or `CLOSE` is never sent. The single removal path is `UID EXPUNGE` of one message, used only after the server confirmed its copy in another folder (`COPYUID`) — iCloud has no IMAP `MOVE`, so this is the RFC 6851 §3.3 equivalent (on servers with `MOVE` the server's own atomic command is used). Every write first checks that the message exists. `update_draft` moves the previous version to Trash, so every edit is recoverable. Folder names must match the server's list exactly, and servers without `UIDPLUS` are refused. These guarantees are tested at the protocol level against a fake IMAP server.
-- **Touch calendars or contacts.** CalDAV support is removed.
+- **Change calendars, or touch contacts.** Calendars are read over CalDAV with `PROPFIND`/`REPORT` only: no event can be created, changed, accepted or deleted. There is no contacts (CardDAV) code.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE) [![Node](https://img.shields.io/badge/node-24-brightgreen.svg)](https://nodejs.org)
 
@@ -27,6 +27,9 @@ What this fork deliberately **cannot** do:
 | `set_flagged` | Set / clear `\Flagged` | yes, reversible |
 | `move_message` | Move between folders, including restoring from Trash | yes, reversible |
 | `move_to_trash` | Move to Trash (refused for messages already in Trash) | yes, reversible |
+| `list_calendars` | Calendars with name, color and component types (`VEVENT`, `VTODO`) | no |
+| `list_events` | Events in a date range (default: the next 7 days), recurring series expanded, sorted | no |
+| `get_event` | One event: full description, organizer, attendees and their responses, recurrence | no |
 
 Read tools open the folder with `EXAMINE`, so reading never marks mail as read.
 
@@ -35,6 +38,10 @@ Read tools open the folder with `EXAMINE`, so reading never marks mail as read.
 `get_message` returns readable plain text, not raw MIME: the text/plain part when it is real text, otherwise the HTML part converted with [html-to-text](https://github.com/html-to-text/node-html-to-text) (no images, styles or hidden preheaders; layout tables flattened). Links become numbered references (`Sign up [3]`), and bare URLs of 100+ characters (tracking and image links) are replaced by references too; `include_links: true` adds `body.links` mapping the numbers on the current page to the intact URLs. Pages are about `max_length` characters (default 15 000; with links, counting the URLs too); `truncated`, `total_length` and `next_offset` let the client read on with `offset`. Raw HTML only with `include_html: true` (paged with `html_offset`). Messages over 8 MB (big attachments) are read part by part.
 
 Previews in `list_messages` / `search_messages` come from the first few KB of each message's own text part, fetched in batches by MIME part number (`BODY.PEEK`), decoded locally and cleaned the same way. Every tool carries MCP annotations (`readOnlyHint` / `destructiveHint`).
+
+### Calendars (read-only)
+
+For iCloud, set `CALENDAR_ICLOUD=on` in `.env`: accounts on `imap.mail.me.com` then read their calendars from `https://caldav.icloud.com` with the same app-specific password (it covers Mail and Calendars). Other providers: add `"caldav": { "url": "https://…" }` to the account in `accounts.json` (`user`/`pass` default to the IMAP ones). `CALENDAR_TIMEZONE` (IANA, default `UTC`) sets how dates in `list_events` are read and how times are shown; each call can override it. Recurring events are expanded with their exceptions; each calendar object's own time zone definitions apply only to that object. Event text can come from other people's invitations and is declared untrusted to the model. iCloud Reminders created since iOS 13 live in CloudKit, not CalDAV; only old-style reminder lists would show up (as `VTODO` calendars), and there is no tool to read them.
 
 ## Authentication
 

@@ -61,7 +61,22 @@ export function loadConfig() {
     accessAudience: required("CF_ACCESS_AUD"),
     /** Comma-separated e-mail addresses allowed to use the connector. */
     allowedEmails: list("ALLOWED_EMAILS"),
+
+    /** "on": read iCloud calendars (CalDAV) with each iCloud account's IMAP app-specific password. */
+    calendarIcloud: /^(on|true|1|yes)$/i.test(optional("CALENDAR_ICLOUD", "off")),
+    /** Default IANA time zone for calendar dates and output. */
+    calendarTimezone: timeZone("CALENDAR_TIMEZONE", "UTC"),
   } as const;
+}
+
+function timeZone(name: string, fallback: string): string {
+  const tz = optional(name, fallback);
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: tz });
+  } catch {
+    throw new Error(`Environment variable ${name} must be an IANA time zone (e.g. America/Los_Angeles).`);
+  }
+  return tz;
 }
 
 export type Config = ReturnType<typeof loadConfig>;

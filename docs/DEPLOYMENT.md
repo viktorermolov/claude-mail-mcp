@@ -83,7 +83,7 @@ Only `/mcp` is routed to the server; every other path returns 404 at the edge.
 curl -s -o /dev/null -w '%{http_code}\n' -X POST https://mail.example.com/mcp   # 401
 ```
 
-Then in claude.ai: Settings → Connectors → Add custom connector → `https://mail.example.com/mcp`. The OAuth login opens the Access page; after login the eleven tools appear.
+Then in claude.ai: Settings → Connectors → Add custom connector → `https://mail.example.com/mcp`. The OAuth login opens the Access page; after login the tools appear (eleven mail tools, plus three read-only calendar tools with `CALENDAR_ICLOUD=on`).
 
 ## Updating
 

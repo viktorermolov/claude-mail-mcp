@@ -8,24 +8,38 @@
  */
 
 import { ImapClient, type ImapLogger } from "./imap-client.js";
-import { Account, AccountsStore } from "./accounts.js";
+import { Account, AccountsStore, type CalDavCreds } from "./accounts.js";
 import { DraftSender } from "./draft-composer.js";
+import { CalDavClient } from "./caldav-client.js";
 
 interface AccountClients {
   imap: ImapClient;
   sender: DraftSender;
   draftsFolder: string;
   trashFolder?: string;
+  /** Read-only calendar client, or null when calendars aren't configured for this account. */
+  calendar: CalDavClient | null;
 }
+
+export interface PoolOptions {
+  log?: ImapLogger;
+  /** CALENDAR_ICLOUD=on: read iCloud calendars with the account's IMAP app-specific password. */
+  icloudCalendar?: boolean;
+}
+
+const ICLOUD_IMAP_HOST = "imap.mail.me.com";
+const ICLOUD_CALDAV_URL = "https://caldav.icloud.com";
 
 export class ClientPool {
   private readonly store: AccountsStore;
   private readonly log?: ImapLogger;
+  private readonly icloudCalendar: boolean;
   private pool: Map<string, AccountClients> = new Map();
 
-  constructor(store: AccountsStore, log?: ImapLogger) {
+  constructor(store: AccountsStore, opts: PoolOptions = {}) {
     this.store = store;
-    this.log = log;
+    this.log = opts.log;
+    this.icloudCalendar = opts.icloudCalendar === true;
   }
 
   /**
@@ -75,6 +89,18 @@ export class ClientPool {
       },
       draftsFolder: account.mail.draftsFolder,
       trashFolder: account.mail.trashFolder,
+      calendar: (() => {
+        const creds = this.calendarCreds(account);
+        return creds ? new CalDavClient(creds) : null;
+      })(),
     };
+  }
+
+  private calendarCreds(account: Account): CalDavCreds | null {
+    if (account.caldav) return account.caldav;
+    if (this.icloudCalendar && account.imap.host.toLowerCase() === ICLOUD_IMAP_HOST) {
+      return { url: ICLOUD_CALDAV_URL, user: account.imap.user, pass: account.imap.pass };
+    }
+    return null;
   }
 }
