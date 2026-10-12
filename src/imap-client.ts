@@ -18,6 +18,10 @@
 
 import { ImapFlow, ImapFlowOptions, FetchMessageObject } from "imapflow";
 import { simpleParser, ParsedMail } from "mailparser";
+import { readableBody, previewOf, type BodySource } from "./body-text.js";
+
+/** How much of each message source list/search fetch to build previews. */
+const PREVIEW_SOURCE_BYTES = 24 * 1024;
 
 export interface ImapAuth {
   host: string;
@@ -54,8 +58,12 @@ export interface MessageDetail extends MessageSummary {
   messageId: string | null;
   inReplyTo: string | null;
   references: string[];
-  bodyText: string | null;
-  bodyHtml: string | null;
+  /** Readable plain text (see body-text.ts), untruncated. */
+  text: string;
+  /** Which MIME part the text came from. */
+  textSource: BodySource;
+  /** Raw HTML part, if any. */
+  html: string | null;
   attachments: Array<{
     filename: string | null;
     contentType: string;
@@ -206,6 +214,7 @@ export class ImapClient {
         throw new Error(`Message UID ${uid} not found in ${mailbox}`);
       }
       const parsed: ParsedMail = await simpleParser(msg.source as Buffer);
+      const body = readableBody(parsed);
       return {
         uid: msg.uid as number,
         seq: msg.seq as number,
@@ -221,7 +230,7 @@ export class ImapClient {
           ? parsed.cc.map((a) => a.text).join(", ")
           : parsed.cc?.text ?? null,
         size: (msg.size as number | undefined) ?? null,
-        preview: parsed.text ? parsed.text.slice(0, 200) : null,
+        preview: previewOf(body.text),
         messageId: parsed.messageId ?? null,
         inReplyTo: parsed.inReplyTo ?? null,
         references: Array.isArray(parsed.references)
@@ -229,8 +238,9 @@ export class ImapClient {
           : parsed.references
             ? [parsed.references]
             : [],
-        bodyText: parsed.text ?? null,
-        bodyHtml: typeof parsed.html === "string" ? parsed.html : null,
+        text: body.text,
+        textSource: body.source,
+        html: typeof parsed.html === "string" ? parsed.html : null,
         attachments: (parsed.attachments ?? []).map((a) => ({
           filename: a.filename ?? null,
           contentType: a.contentType,
@@ -454,10 +464,11 @@ export class ImapClient {
       flags: true,
       internalDate: true,
       size: true,
-      bodyParts: ["1"],
+      // The head of the raw message is enough to parse a preview.
+      source: { start: 0, maxLength: PREVIEW_SOURCE_BYTES },
     };
     for await (const msg of client.fetch(range, fetchOpts, { uid: byUid })) {
-      out.push(summarize(msg));
+      out.push(await summarize(msg));
     }
     return out;
   }
@@ -484,16 +495,19 @@ function addrText(
   );
 }
 
-function summarize(msg: FetchMessageObject): MessageSummary {
+async function summarize(msg: FetchMessageObject): Promise<MessageSummary> {
   const env = msg.envelope;
-  // Try to grab a short text preview from bodyParts if present.
   let preview: string | null = null;
-  const bodyParts = msg.bodyParts;
-  if (bodyParts && bodyParts.size > 0) {
-    const part = bodyParts.values().next().value;
-    if (part) {
-      const text = Buffer.isBuffer(part) ? part.toString("utf8") : String(part);
-      preview = text.replace(/\s+/g, " ").slice(0, 200);
+  if (msg.source) {
+    try {
+      const parsed = await simpleParser(msg.source as Buffer, {
+        skipImageLinks: true,
+        skipTextLinks: true,
+        skipTextToHtml: true,
+      });
+      preview = previewOf(readableBody(parsed).text);
+    } catch {
+      // A truncated or malformed source just means no preview.
     }
   }
   return {

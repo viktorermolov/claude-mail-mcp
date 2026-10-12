@@ -17,13 +17,16 @@ import { z } from "zod";
 import { ClientPool } from "./client-pool.js";
 import { AccountsStore } from "./accounts.js";
 import { buildDraftSource } from "./draft-composer.js";
+import { windowText } from "./body-text.js";
+
+const DEFAULT_BODY_CHARS = 15_000;
 
 function asJson(value: unknown): { content: { type: "text"; text: string }[] } {
   return {
     content: [
       {
         type: "text" as const,
-        text: JSON.stringify(value, null, 2),
+        text: JSON.stringify(value),
       },
     ],
   };
@@ -161,9 +164,9 @@ export function registerMailTools(
   server.registerTool(
     "get_message",
     {
-      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
       description:
-        "Fetch one message by UID. Returns headers, full text+HTML body, attachment metadata (filenames + content types, NOT raw bytes), and threading IDs (Message-ID, In-Reply-To, References) for replies.",
+        "Fetch one message by UID. Returns headers, threading IDs (Message-ID, In-Reply-To, References), attachment metadata and the body as clean plain text (newsletter HTML is converted; images and styles dropped, links kept as `label <url>`). Long bodies are paged: if `truncated` is true, call again with `offset` = `next_offset`. Raw HTML only with include_html: true.",
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
       inputSchema: {
         mailbox: z.string().describe("IMAP folder the message lives in"),
         uid: z
@@ -171,12 +174,67 @@ export function registerMailTools(
           .int()
           .positive()
           .describe("Message UID as returned by list_messages/search_messages"),
+        offset: z
+          .number()
+          .int()
+          .min(0)
+          .optional()
+          .describe("Character offset into the text body (default 0); use next_offset to continue"),
+        max_length: z
+          .number()
+          .int()
+          .min(500)
+          .max(100_000)
+          .optional()
+          .describe(`Max characters of text to return (default ${DEFAULT_BODY_CHARS})`),
+        include_html: z
+          .boolean()
+          .optional()
+          .describe("Also return the raw HTML part (paged with html_offset). Large — only when the text is not enough."),
+        html_offset: z.number().int().min(0).optional().describe("Character offset into the raw HTML (default 0)"),
         account: accountSchema,
       },
     },
-    async ({ mailbox, uid, account }) => {
+    async ({ mailbox, uid, offset, max_length, include_html, html_offset, account }) => {
       const { imap } = pool.for(account);
-      return asJson(await imap.getMessage(mailbox, uid));
+      const m = await imap.getMessage(mailbox, uid);
+      const max = max_length ?? DEFAULT_BODY_CHARS;
+      const body = windowText(m.text, offset ?? 0, max);
+      const result: Record<string, unknown> = {
+        uid: m.uid,
+        mailbox,
+        flags: m.flags,
+        date: m.date,
+        subject: m.subject,
+        from: m.from,
+        to: m.to,
+        cc: m.cc,
+        size: m.size,
+        message_id: m.messageId,
+        in_reply_to: m.inReplyTo,
+        references: m.references,
+        attachments: m.attachments,
+        body: {
+          text: body.text,
+          source: m.textSource,
+          offset: body.offset,
+          total_length: body.total_length,
+          truncated: body.truncated,
+          next_offset: body.next_offset,
+        },
+        has_html: m.html !== null,
+      };
+      if (include_html && m.html !== null) {
+        const html = windowText(m.html, html_offset ?? 0, max);
+        result.html = {
+          html: html.text,
+          offset: html.offset,
+          total_length: html.total_length,
+          truncated: html.truncated,
+          next_offset: html.next_offset,
+        };
+      }
+      return asJson(result);
     }
   );
 
