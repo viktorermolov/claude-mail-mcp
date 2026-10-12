@@ -7,7 +7,7 @@
  * reconnects are cheap (~one TLS handshake).
  */
 
-import { ImapClient } from "./imap-client.js";
+import { ImapClient, type ImapLogger } from "./imap-client.js";
 import { Account, AccountsStore } from "./accounts.js";
 import { DraftSender } from "./draft-composer.js";
 
@@ -20,10 +20,12 @@ interface AccountClients {
 
 export class ClientPool {
   private readonly store: AccountsStore;
+  private readonly log?: ImapLogger;
   private pool: Map<string, AccountClients> = new Map();
 
-  constructor(store: AccountsStore) {
+  constructor(store: AccountsStore, log?: ImapLogger) {
     this.store = store;
+    this.log = log;
   }
 
   /**
@@ -55,13 +57,16 @@ export class ClientPool {
   }
 
   private build(account: Account): AccountClients {
-    const imap = new ImapClient({
-      host: account.imap.host,
-      port: account.imap.port,
-      user: account.imap.user,
-      pass: account.imap.pass,
-      secure: account.imap.tls,
-    });
+    const imap = new ImapClient(
+      {
+        host: account.imap.host,
+        port: account.imap.port,
+        user: account.imap.user,
+        pass: account.imap.pass,
+        secure: account.imap.tls,
+      },
+      { log: this.log, accountId: account.id }
+    );
     return {
       imap,
       sender: {

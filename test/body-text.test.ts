@@ -7,9 +7,9 @@ import { textParts, decodePart, ImapClient } from "../src/imap-client.js";
 const MSO_PLAIN = `Community Blog\n\n<!--[if gte mso 9]>\n<v:background fill="t"/>\n<![endif]-->\n|<!--[if mso]><td align="center"><![endif]-->\n| Hello&nbsp;&nbsp;families`;
 const NEWSLETTER_HTML = `<html><head><style>.x{color:red}</style></head><body>
 <div style="display:none">preheader filler text</div>
-<table role="presentation"><tr><td><h2>Timberwolf Times</h2></td></tr>
-<tr><td><img src="https://cdn.example.com/a.png" alt="Mrs. Spears"><p>Friendly reminder, we have school&nbsp;tomorrow!</p>
-<p>Read more <a href="https://www.parentsquare.com/feeds/123">on ParentSquare</a> or visit <a href="https://example.org">https://example.org</a>.</p></td></tr></table>
+<table role="presentation"><tr><td><h2>Weekly Bulletin</h2></td></tr>
+<tr><td><img src="https://cdn.example.com/a.png" alt="Staff photo"><p>Friendly reminder, the office is open&nbsp;tomorrow!</p>
+<p>Read more <a href="https://newsletter.example.com/posts/123">on the website</a> or visit <a href="https://example.org">https://example.org</a>.</p></td></tr></table>
 </body></html>`;
 
 test("text/plain with MSO comments is detected as junk", () => {
@@ -21,9 +21,9 @@ test("junky text/plain falls back to HTML conversion", () => {
   const r = readableBody({ text: MSO_PLAIN, html: NEWSLETTER_HTML });
   assert.equal(r.source, "html");
   assert.doesNotMatch(r.text, /<!--|<td|<table|&nbsp;|\.x\{|cdn\.example\.com|preheader filler/);
-  assert.match(r.text, /Timberwolf Times/);
-  assert.match(r.text, /school tomorrow!/);
-  assert.match(r.text, /on ParentSquare <https:\/\/www\.parentsquare\.com\/feeds\/123>/);
+  assert.match(r.text, /Weekly Bulletin/);
+  assert.match(r.text, /office is open tomorrow!/);
+  assert.match(r.text, /on the website <https:\/\/newsletter\.example\.com\/posts\/123>/);
   // URL equal to its label is not repeated
   assert.match(r.text, /visit https:\/\/example\.org\./);
   assert.doesNotMatch(r.text, /\n{3,}/);
@@ -75,7 +75,7 @@ test("windowText pages through the whole text without loss", () => {
 
 
 test("links become numbered references; repeats share a number", () => {
-  const long = "https://email-link.parentsquare.com/ls/click?upn=" + "x".repeat(400);
+  const long = "https://click.example.com/ls/click?upn=" + "x".repeat(400);
   const { text, links } = footnoteLinks(`Click here <${long}> to sign up.\nAgain <${long}>, or <https://example.org/b>.`);
   assert.equal(text, "Click here [1] to sign up.\nAgain [1], or [2].");
   assert.deepEqual(links, [long, "https://example.org/b"]);
@@ -88,12 +88,12 @@ test("previews drop URLs and reference markers", () => {
 });
 
 test("junky text/plain without HTML part is cleaned of image/table residue", () => {
-  const junk = "<!--[if mso]><td><![endif]-->\n| \n## Timberwolf Times\n| \n ![Mrs. Spears](https://cdn.x/a.png)\n |\nHello families";
+  const junk = "<!--[if mso]><td><![endif]-->\n| \n## Weekly Bulletin\n| \n ![Staff photo](https://cdn.x/a.png)\n |\nHello everyone";
   const out = cleanJunkPlain(junk);
   assert.doesNotMatch(out, /!\[|\]\(|^\s*\|/m);
   assert.doesNotMatch(out, /##/);
-  assert.match(out, /Timberwolf Times/);
-  assert.match(out, /Hello families/);
+  assert.match(out, /Weekly Bulletin/);
+  assert.match(out, /Hello everyone/);
   assert.equal(readableBody({ text: junk }).text, out);
 });
 
@@ -146,4 +146,80 @@ test("previews are fetched in batches per part number, not per message", async (
   const previews = await (imap as unknown as { previewsFor: (c: unknown, m: unknown) => Promise<Map<number, string>> }).previewsFor(fake, msgs);
   assert.deepEqual([...previews.entries()].sort(), [[1, "Hello from one"], [2, "Hello from two"], [3, "Hello from three"]]);
   assert.deepEqual(fetches, ["1:1,2,3"]);
+});
+
+// ---- hostile input, links, paging edges ------------------------------------------
+
+const timed = <T>(fn: () => T): { ms: number; out: T } => {
+  const t0 = performance.now();
+  const out = fn();
+  return { ms: performance.now() - t0, out };
+};
+
+test("hostile inputs stay linear-time", () => {
+  const MB = 1_000_000;
+  const cases: [string, () => unknown][] = [
+    ["1 MB of spaces without newline (tidy)", () => readableBody({ text: "x" + " ".repeat(MB) + "y" })],
+    ["1 MB of NBSP (tidy)", () => readableBody({ text: "x" + " ".repeat(MB) + "y" })],
+    ["200 KB of '![' (cleanJunkPlain)", () => cleanJunkPlain("<td>" + "![".repeat(100_000))],
+    ["200 KB of U+2028 after '|' (cleanJunkPlain)", () => cleanJunkPlain("<td>|" + " ".repeat(200_000) + "x")],
+    ["URL ending in 500 KB of ')' (footnoteLinks)", () => footnoteLinks("https://e.com/" + ")".repeat(500_000) + "x")],
+    ["500 KB HTML <pre> whitespace", () => htmlToPlain("<pre>" + " ".repeat(500_000) + "</pre>")],
+  ];
+  for (const [name, fn] of cases) {
+    const { ms } = timed(fn);
+    assert.ok(ms < 1500, `${name} took ${Math.round(ms)} ms`);
+  }
+});
+
+test("deeply nested HTML converts instead of overflowing the stack", () => {
+  const html = "<span>".repeat(5000) + "deep text";
+  const out = readableBody({ html });
+  assert.equal(out.source, "html");
+  assert.doesNotThrow(() => htmlToPlain(html));
+});
+
+test("Unicode layout spaces and blank letters collapse like spaces", () => {
+  const text = "Order date\n ㅤ⠀\n\n​\n\nDelivered next";
+  assert.equal(readableBody({ text }).text, "Order date\n\nDelivered\nnext");
+});
+
+test("long bare URLs become references; short ones stay; mail's own [1] becomes (1)", () => {
+  const long = "https://w-mt.co/g/rptrcks/clickTracker?redirectTo=" + "A".repeat(200);
+  const { text, links } = footnoteLinks(`${long}\nSee note [1] and https://example.org/x.\nAgain ${long}).`);
+  assert.equal(text, "[1]\nSee note (1) and https://example.org/x.\nAgain [1]).");
+  assert.deepEqual(links, [long]);
+});
+
+test("windowText never splits a surrogate pair or a [n] reference", () => {
+  const emoji = "😀".repeat(3000); // no spaces: hard cuts
+  let off = 0;
+  let rebuilt = "";
+  for (;;) {
+    const w = windowText(emoji, off, 1001);
+    assert.ok(!/[\ud800-\udbff]$/.test(w.text), "page ends with a lone high surrogate");
+    assert.ok(!/^[\udc00-\udfff]/.test(w.text), "page starts with a lone low surrogate");
+    rebuilt += w.text;
+    if (!w.truncated) break;
+    off = w.next_offset!;
+  }
+  assert.equal(rebuilt, emoji);
+  const refs = "x".repeat(995) + "[123]" + "y".repeat(100);
+  const w = windowText(refs, 0, 998);
+  assert.ok(w.text.endsWith("x"), "must stop before the '[123]' marker");
+  assert.equal(windowText(refs, w.next_offset!, 50).text.slice(0, 5), "[123]");
+  // A caller-supplied offset inside a pair is realigned.
+  assert.equal(windowText("a😀b", 2, 10).text, "😀b");
+});
+
+test("previewOf never ends on a lone surrogate", () => {
+  const p = previewOf("😀".repeat(300))!;
+  assert.ok(!/[\ud800-\udbff]…$/.test(p));
+});
+
+test("decodePart keeps the last base64 quantum of complete parts", () => {
+  for (const s of ["OK", "Hello world", "Привет"]) {
+    const b64 = Buffer.from(Buffer.from(s).toString("base64") + "\r\n");
+    assert.equal(decodePart(b64, { encoding: "base64", charset: "utf-8" }), s);
+  }
 });

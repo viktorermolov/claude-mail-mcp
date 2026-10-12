@@ -1,16 +1,16 @@
 {
   "name": "claude-mail-mcp",
-  "version": "0.5.0",
-  "description": "Self-hosted IMAP-only MCP connector for Claude: read, search, drafts, move, flags, trash — no sending, no expunge. Auth via Cloudflare Access Managed OAuth.",
+  "version": "0.6.0",
+  "description": "Self-hosted IMAP-only MCP connector for Claude: read, search, text drafts, move, flags, trash — no sending, no permanent deletion. Auth via Cloudflare Access Managed OAuth.",
   "license": "MIT",
-  "author": "Markus Stöger <hi@markusstoeger.com> (https://markusstoeger.com)",
-  "homepage": "https://markusstoeger.com/repos#claude-mail-mcp",
+  "author": "Viktor Ermolov (fork)",
+  "homepage": "https://github.com/viktorermolov/claude-mail-mcp#readme",
   "repository": {
     "type": "git",
-    "url": "https://github.com/maxx3250/claude-mail-mcp.git"
+    "url": "https://github.com/viktorermolov/claude-mail-mcp.git"
   },
   "bugs": {
-    "url": "https://github.com/maxx3250/claude-mail-mcp/issues"
+    "url": "https://github.com/viktorermolov/claude-mail-mcp/security/advisories/new"
   },
   "keywords": [
     "claude",
@@ -44,7 +44,7 @@
     "test": "node --import tsx --test test/*.test.ts"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=24"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.6.1",
@@ -66,5 +66,8 @@
     "@types/nodemailer": "^8.0.2",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2"
-  }
+  },
+  "contributors": [
+    "Markus Stöger <hi@markusstoeger.com> (https://markusstoeger.com)"
+  ]
 }

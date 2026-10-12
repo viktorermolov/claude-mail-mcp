@@ -72,11 +72,13 @@ export class AccountsStoreError extends Error {
 }
 
 export class NoSuchAccountError extends Error {
-  constructor(public readonly accountId: string, availableIds: string[]) {
+  constructor(public readonly accountId: string, availableIds: string[], fileError?: string) {
     super(
-      availableIds.length === 0
-        ? `No mailbox accounts configured yet. The operator has to fill in accounts.json on the server.`
-        : `Account "${accountId}" is not configured. Available: ${availableIds.join(", ")}.`
+      fileError && availableIds.length === 0
+        ? `No mailbox account is available: accounts.json could not be loaded (${fileError}). The operator has to fix it on the server.`
+        : availableIds.length === 0
+          ? `No mailbox accounts configured yet. The operator has to fill in accounts.json on the server.`
+          : `Account "${accountId}" is not configured. Available: ${availableIds.join(", ")}.`
     );
     this.name = "NoSuchAccountError";
   }
@@ -87,6 +89,8 @@ export class AccountsStore {
   private byId: Map<string, Account> = new Map();
   private watcher: FSWatcher | null = null;
   private readonly filePath: string;
+  /** Why the last load failed (field names only, never values), or null. */
+  private loadError: string | null = null;
   private onChange?: (next: Account[], prev: Account[]) => void;
 
   constructor(filePath: string) {
@@ -99,8 +103,19 @@ export class AccountsStore {
    */
   async start(onChange?: (next: Account[], prev: Account[]) => void): Promise<void> {
     this.onChange = onChange;
-    await this.reload();
+    try {
+      await this.reload();
+    } catch {
+      // An invalid or unreadable file must not crash-loop the container:
+      // start with no accounts, report why, and pick up the fix via watch.
+      logAccountsError("accounts.json could not be loaded at startup", this.loadError);
+    }
     this.watchFile();
+  }
+
+  /** Null when the last load succeeded; otherwise a short reason. */
+  error(): string | null {
+    return this.loadError;
   }
 
   /** Shut down the fs.watch listener. */
@@ -121,7 +136,9 @@ export class AccountsStore {
     try {
       raw = await fs.readFile(this.filePath, "utf8");
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === "ENOENT") {
+        this.loadError = null;
         this.accounts = [];
         this.byId = new Map();
         if (this.onChange && prev.length > 0) {
@@ -129,10 +146,18 @@ export class AccountsStore {
         }
         return;
       }
+      this.loadError = `cannot read file: ${code ?? "error"}`;
       throw err;
     }
 
-    const parsed = parseAccountsFile(raw);
+    let parsed: AccountsFile;
+    try {
+      parsed = parseAccountsFile(raw);
+    } catch (err) {
+      this.loadError = err instanceof Error ? err.message : "invalid file";
+      throw err;
+    }
+    this.loadError = null;
     this.accounts = parsed.accounts;
     this.byId = new Map(parsed.accounts.map((a) => [a.id, a]));
     if (this.onChange) {
@@ -158,11 +183,11 @@ export class AccountsStore {
   resolve(accountId?: string): Account {
     if (accountId) {
       const acc = this.byId.get(accountId);
-      if (!acc) throw new NoSuchAccountError(accountId, this.ids());
+      if (!acc) throw new NoSuchAccountError(accountId, this.ids(), this.loadError ?? undefined);
       return acc;
     }
     const def = this.accounts.find((a) => a.default) ?? this.accounts[0];
-    if (!def) throw new NoSuchAccountError("(default)", []);
+    if (!def) throw new NoSuchAccountError("(default)", [], this.loadError ?? undefined);
     return def;
   }
 
@@ -197,18 +222,11 @@ export class AccountsStore {
         if (pending) clearTimeout(pending);
         // Debounce: editors can fire multiple events for a single save.
         pending = setTimeout(() => {
-          this.reload().catch((err) => {
-            // Don't crash the server on a malformed save; just keep the old
-            // accounts in memory. The message never contains the password:
+          this.reload().catch(() => {
+            // Don't crash the server on a malformed save; keep the old
+            // accounts in memory. The reason never contains the password:
             // parse errors name the field, not its value.
-            console.error(
-              JSON.stringify({
-                ts: new Date().toISOString(),
-                level: "error",
-                msg: "accounts.json reload failed",
-                error: err instanceof Error ? err.message : String(err),
-              })
-            );
+            logAccountsError("accounts.json reload failed; keeping the previous accounts", this.loadError);
           });
         }, 150);
       });
@@ -223,6 +241,12 @@ export class AccountsStore {
       );
     }
   }
+}
+
+function logAccountsError(msg: string, reason: string | null): void {
+  console.error(
+    JSON.stringify({ ts: new Date().toISOString(), level: "error", msg, error: reason ?? "unknown" })
+  );
 }
 
 export function parseAccountsFile(raw: string): AccountsFile {

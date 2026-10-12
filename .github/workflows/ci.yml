@@ -3,27 +3,46 @@ on:
   pull_request:
   push:
     branches: [main]
+  schedule:
+    # Weekly: a new advisory against a dependency or a base image turns this red.
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
 permissions:
   contents: read
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 22
+          # Same major as the runtime image (distroless nodejs24).
+          node-version: 24
           cache: npm
-      - run: npm ci
+      - run: npm ci --ignore-scripts
       - run: npm run build
       - run: npm test
       - run: npm audit --omit=dev --audit-level=moderate
   docker:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - run: docker build -t claude-mail-mcp:ci .
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: docker build --pull -t claude-mail-mcp:ci .
       - name: image runs as non-root and has no shell
         run: |
           test "$(docker image inspect -f '{{.Config.User}}' claude-mail-mcp:ci)" = "nonroot"
           ! docker run --rm --entrypoint /bin/sh claude-mail-mcp:ci -c true
+      - name: built image starts, serves /health and rejects unauthenticated /mcp
+        run: |
+          mkdir -p smoke && cp deploy/accounts.example.json smoke/accounts.json && chmod 644 smoke/accounts.json
+          docker run -d --name smoke --read-only --cap-drop ALL -p 127.0.0.1:3220:3220 \
+            -v "$PWD/smoke:/run/secrets:ro" \
+            -e ACCOUNTS_FILE=/run/secrets/accounts.json \
+            -e CF_ACCESS_TEAM_DOMAIN=example.cloudflareaccess.com \
+            -e CF_ACCESS_AUD=ci-smoke -e ALLOWED_EMAILS=ci@example.com \
+            claude-mail-mcp:ci
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:3220/health && break; sleep 1; done
+          test "$(curl -s http://127.0.0.1:3220/health)" = '{"status":"ok"}'
+          test "$(curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:3220/mcp)" = "401"
+          docker logs smoke
+          docker stop smoke

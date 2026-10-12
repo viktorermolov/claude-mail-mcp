@@ -4,6 +4,11 @@
  * Uses nodemailer's MailComposer only — no transport is ever created, so
  * nothing here can talk to an SMTP server. The result is APPENDed to the
  * Drafts folder over IMAP and the user sends it from their own mail client.
+ *
+ * Drafts are plain text only. HTML drafts could carry remote images
+ * (<img src="https://…?data=…">) that a mail client or Mail Privacy
+ * Protection fetches when the draft is opened, which would leak data
+ * without anything being sent.
  */
 
 import MailComposer from "nodemailer/lib/mail-composer";
@@ -19,8 +24,7 @@ export interface DraftMessage {
   cc?: string | string[];
   bcc?: string | string[];
   subject: string;
-  text?: string;
-  html?: string;
+  text: string;
   inReplyTo?: string;
   references?: string[];
 }
@@ -30,12 +34,13 @@ export async function buildDraftSource(
   msg: DraftMessage
 ): Promise<Buffer> {
   const from = sender.fromName
-    ? `"${sender.fromName.replace(/"/g, '\\"')}" <${sender.from}>`
+    ? `"${sender.fromName.replace(/[\\"]/g, "\\$&")}" <${sender.from}>`
     : sender.from;
   const opts: Mail.Options = {
     from,
     to: msg.to,
     subject: msg.subject,
+    text: msg.text,
     // Never resolve remote resources while composing.
     disableUrlAccess: true,
     disableFileAccess: true,
@@ -44,8 +49,6 @@ export async function buildDraftSource(
   // MailComposer drops Bcc from the headers by default; keep it so the
   // recipients survive in the draft (the mail client strips it on send).
   if (msg.bcc) opts.bcc = msg.bcc;
-  if (msg.text) opts.text = msg.text;
-  if (msg.html) opts.html = msg.html;
   if (msg.inReplyTo) opts.inReplyTo = msg.inReplyTo;
   if (msg.references) opts.references = msg.references;
 
