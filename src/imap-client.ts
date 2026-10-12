@@ -32,7 +32,7 @@ import libqp from "libqp";
 
 /** Byte caps for the raw text part fetched to build a preview. */
 const PREVIEW_PLAIN_BYTES = 8 * 1024;
-const PREVIEW_HTML_BYTES = 48 * 1024;
+const PREVIEW_HTML_BYTES = 96 * 1024;
 
 export interface ImapAuth {
   host: string;
