@@ -19,6 +19,7 @@ import { loadConfig } from "./config.js";
 import { AccountsStore } from "./accounts.js";
 import { ClientPool } from "./client-pool.js";
 import { accessAuth } from "./access-auth.js";
+import { IMAP_TIMEOUTS, runningImapOperations } from "./imap-client.js";
 import { createApp, Logger, VERSION, type AppState } from "./app.js";
 
 const LEVELS = { debug: 0, info: 1, warn: 2, error: 3 } as const;
@@ -29,8 +30,12 @@ const log: Logger = (level, message, extra) => {
   console.error(JSON.stringify({ ts: new Date().toISOString(), level, msg: message, ...extra }));
 };
 
-/** Must stay below Docker's stop timeout (compose sets stop_grace_period: 20s). */
-const DRAIN_MS = 15_000;
+/**
+ * Long enough for an IMAP operation to reach its own deadline, so a move
+ * or draft update is never cut off by shutdown; must stay below Docker's
+ * stop timeout (compose sets stop_grace_period: 75s).
+ */
+const DRAIN_MS = IMAP_TIMEOUTS.operationMs + 5_000;
 
 async function main(): Promise<void> {
   const config = loadConfig();
@@ -88,15 +93,19 @@ async function main(): Promise<void> {
     if (stopping) return;
     stopping = true;
     state.shuttingDown = true;
-    log("info", "shutting down", { signal, inflight: state.inflight });
+    log("info", "shutting down", { signal, inflight: state.inflight, imap_running: runningImapOperations() });
     server.close();
-    // Let in-flight tool calls finish (moves/draft updates must not stop
+    // Let in-flight requests and IMAP operations finish (including ones
+    // whose HTTP client already left: moves/draft updates must not stop
     // half-way), then drop idle keep-alive connections.
+    const busy = (): boolean => state.inflight > 0 || runningImapOperations() > 0;
     const deadline = Date.now() + DRAIN_MS;
-    while (state.inflight > 0 && Date.now() < deadline) {
+    while (busy() && Date.now() < deadline) {
       await new Promise((r) => setTimeout(r, 100));
     }
-    if (state.inflight > 0) log("warn", "shutdown with requests still running", { inflight: state.inflight });
+    if (busy()) {
+      log("warn", "shutdown with work still running", { inflight: state.inflight, imap_running: runningImapOperations() });
+    }
     server.closeAllConnections();
     store.stop();
     await pool.closeAll().catch(() => {});

@@ -290,6 +290,76 @@ test("key fetch failure → 503 (not 401); last good keys keep working through a
   for (const s of [jwks.server, good.server, cold.server]) s.close();
 });
 
+test("a key dropped by a successful fetch stays dropped during an outage; unknown keys then get 503", async () => {
+  let mode: "both" | "k2only" | "down" = "both";
+  const kp2 = await generateKeyPair("RS256", { extractable: true });
+  const jwk2 = { ...(await exportJWK(kp2.publicKey)), kid: "k2", alg: "RS256" };
+  const jwks = await listen((_req, res) => {
+    if (mode === "down") {
+      res.statusCode = 500;
+      res.end("down");
+      return;
+    }
+    res.setHeader("content-type", "application/json");
+    res.end(JSON.stringify({ keys: mode === "both" ? [publicJwk, jwk2] : [jwk2] }));
+  });
+  const app = createApp({
+    pool,
+    store,
+    log: () => {},
+    auth: accessAuth({ teamDomain: TEAM, audience: AUD, allowedEmails: [OWNER], jwksUrl: `${jwks.url}/certs`, cacheMaxAgeMs: 1 }),
+  });
+  const s = await listen(app);
+  const sleep = () => new Promise((r) => setTimeout(r, 5));
+  const t1 = await token();
+  const t2 = await new SignJWT({ email: OWNER })
+    .setProtectedHeader({ alg: "RS256", kid: "k2" })
+    .setIssuer(ISS)
+    .setAudience(AUD)
+    .setIssuedAt()
+    .setExpirationTime("5m")
+    .sign(kp2.privateKey);
+  assert.equal((await callMcp({ "cf-access-jwt-assertion": t1 }, s.url)).status, 200);
+  mode = "k2only"; // k1 is rotated out
+  await sleep();
+  assert.equal((await callMcp({ "cf-access-jwt-assertion": t1 }, s.url)).status, 401);
+  mode = "down";
+  await sleep();
+  assert.equal((await callMcp({ "cf-access-jwt-assertion": t1 }, s.url)).status, 503, "dropped key must not come back");
+  assert.equal((await callMcp({ "cf-access-jwt-assertion": t2 }, s.url)).status, 200, "last fetched key still works");
+  for (const x of [jwks.server, s.server]) x.close();
+});
+
+test("in-flight count covers the auth wait and returns to 0 when a client disconnects mid-call", async () => {
+  const state = { shuttingDown: false, inflight: 0 };
+  const slowPool = {
+    for: () => ({ imap: { getMessage: () => new Promise((r) => setTimeout(r, 400)) } }),
+  } as unknown as ClientPool;
+  const app = createApp({
+    pool: slowPool,
+    store,
+    log: () => {},
+    state,
+    auth: (_q, _r, n) => void setTimeout(n, 100),
+  });
+  const s = await listen(app);
+  const ac = new AbortController();
+  const call = fetch(`${s.url}/mcp`, {
+    method: "POST",
+    signal: ac.signal,
+    headers: { "content-type": "application/json", accept: "application/json, text/event-stream" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "get_message", arguments: { mailbox: "INBOX", uid: 1 } } }),
+  }).catch(() => null);
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal(state.inflight, 1, "counted while still in auth");
+  await new Promise((r) => setTimeout(r, 150));
+  ac.abort();
+  await call;
+  await new Promise((r) => setTimeout(r, 400));
+  assert.equal(state.inflight, 0);
+  s.server.close();
+});
+
 test("shutting down → 503 for new requests", async () => {
   const state = { shuttingDown: true, inflight: 0 };
   const app = createApp({ pool, store, log: () => {}, state, auth: (_q, _r, n) => n() });
@@ -301,7 +371,15 @@ test("shutting down → 503 for new requests", async () => {
 // ---- tool input validation -----------------------------------------------------
 
 test("drafts: recipients must be bare addresses; header fields can't carry line breaks", async () => {
-  const client = await mcpClient();
+  let appended = 0;
+  const spyPool = {
+    for: () => ({
+      imap: { appendDraft: async () => (appended++, 7) },
+      sender: { from: OWNER },
+      draftsFolder: "Drafts",
+    }),
+  } as unknown as ClientPool;
+  const client = await mcpClient(spyPool);
   const call = (args: Record<string, unknown>) =>
     client.callTool({ name: "create_draft", arguments: { to: "a@example.com", subject: "s", text: "t", ...args } });
   for (const bad of [
@@ -313,7 +391,12 @@ test("drafts: recipients must be bare addresses; header fields can't carry line 
   ]) {
     const r = await call(bad);
     assert.equal((r as { isError?: boolean }).isError, true, JSON.stringify(bad));
+    assert.match(textOf(r), /validation/i, `rejected by the schema: ${JSON.stringify(bad)}`);
   }
+  assert.equal(appended, 0, "bad input must never reach IMAP");
+  const ok = await call({});
+  assert.notEqual((ok as { isError?: boolean }).isError, true, textOf(ok));
+  assert.equal(appended, 1, "positive control: valid input does reach IMAP");
   await client.close();
 });
 
@@ -363,13 +446,30 @@ test("get_message pages link-heavy bodies within max_length (with include_links)
     const r = await client.callTool({ name: "get_message", arguments: { mailbox: "INBOX", uid: 1, offset, max_length: 6000, include_links: true } });
     const body = JSON.parse(textOf(r)).body;
     const linkChars = Object.values(body.links as Record<string, string>).reduce((n: number, u) => n + u.length + 8, 0);
-    assert.ok(body.text.length + linkChars <= 6000 || body.text.length <= 2000, `page ${page} too big`);
-    for (const m of body.text.matchAll(/\[(\d+)\]/g)) assert.ok(body.links[m[1]], `link ${m[1]} unresolved`);
+    assert.ok(body.text.length + linkChars <= 6000, `page ${page} too big`);
+    const refs = new Set([...body.text.matchAll(/\[(\d+)\]/g)].map((m) => m[1]));
+    const unresolved = [...refs].filter((n) => !body.links[n]).length;
+    assert.equal(unresolved, body.links_omitted ?? 0, `page ${page}: unresolved links must be counted`);
+    assert.equal(unresolved, 0, "with a 500-char text floor these links all fit");
     rebuilt += body.text;
     if (!body.truncated) break;
     offset = body.next_offset;
   }
   assert.equal(rebuilt.replace(/ \[\d+\]/g, ""), paras.map((p) => p.replace(/ <[^>]+>/, "")).join("\n\n"));
+  await client.close();
+});
+
+test("get_message cuts very long URLs and never exceeds max_length because of links", async () => {
+  const huge = (i: number) => `https://t.example/${i}?` + "z".repeat(5_000);
+  const text = Array.from({ length: 6 }, (_, i) => `Item ${i} <${huge(i)}>`).join("\n");
+  const client = await mcpClient(fakePoolWithText(text));
+  const r = JSON.parse(textOf(await client.callTool({ name: "get_message", arguments: { mailbox: "INBOX", uid: 1, max_length: 3000, include_links: true } })));
+  const shown = Object.values(r.body.links as Record<string, string>);
+  assert.ok(shown.length >= 1);
+  for (const u of shown) assert.ok(u.endsWith("…(truncated)") && u.length < 2_100, u.slice(-20));
+  const total = r.body.text.length + shown.reduce((n: number, u: string) => n + u.length + 8, 0);
+  assert.ok(total <= 3000, `page is ${total} chars`);
+  assert.equal(shown.length + (r.body.links_omitted ?? 0), new Set([...r.body.text.matchAll(/\[(\d+)\]/g)].map((m: RegExpMatchArray) => m[1])).size);
   await client.close();
 });
 

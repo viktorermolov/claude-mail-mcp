@@ -69,8 +69,21 @@ export function createApp(deps: {
   // process buffer and parse large payloads.
   const parseJson = express.json({ limit: "1mb", inflate: false });
 
-  app.post("/mcp", refuseWhileStopping, auth, parseJson, async (req, res) => {
+  // Counted from the moment a request is accepted (including the auth and
+  // body wait) until its response is finished or the client goes away.
+  const track: RequestHandler = (_req, res, next) => {
     state.inflight++;
+    let done = false;
+    res.on("close", () => {
+      if (!done) {
+        done = true;
+        state.inflight--;
+      }
+    });
+    next();
+  };
+
+  app.post("/mcp", refuseWhileStopping, track, auth, parseJson, async (req, res) => {
     // Stateless mode: a fresh server + transport per request, so concurrent
     // requests can never share a transport.
     const mcp = buildMcpServer(pool, store, log);
@@ -92,8 +105,6 @@ export function createApp(deps: {
       if (!res.headersSent) {
         res.status(500).json({ jsonrpc: "2.0", id: null, error: { code: -32603, message: "Internal error" } });
       }
-    } finally {
-      state.inflight--;
     }
   });
 

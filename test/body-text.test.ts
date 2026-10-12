@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { looksLikeHtmlJunk, readableBody, previewOf, windowText, htmlToPlain } from "../src/body-text.js";
-import { footnoteLinks, linksIn, stripLinks, cleanJunkPlain } from "../src/body-text.js";
+import { footnoteLinks, linksIn, stripLinks, cleanJunkPlain, MAX_PLAIN_CHARS } from "../src/body-text.js";
 import { textParts, decodePart, ImapClient } from "../src/imap-client.js";
 
 const MSO_PLAIN = `Community Blog\n\n<!--[if gte mso 9]>\n<v:background fill="t"/>\n<![endif]-->\n|<!--[if mso]><td align="center"><![endif]-->\n| Hello&nbsp;&nbsp;families`;
@@ -37,7 +37,7 @@ test("clean text/plain is used as-is (tidied)", () => {
 
 test("html-only and empty messages", () => {
   assert.equal(readableBody({ html: "<p>Only <b>html</b></p>" }).text, "Only html");
-  assert.deepEqual(readableBody({}), { text: "", source: "none" });
+  assert.deepEqual(readableBody({}), { text: "", source: "none", capped: false });
   assert.equal(htmlToPlain("<h1>Title</h1><p>x</p>"), "Title\n\nx");
 });
 
@@ -222,4 +222,92 @@ test("decodePart keeps the last base64 quantum of complete parts", () => {
     const b64 = Buffer.from(Buffer.from(s).toString("base64") + "\r\n");
     assert.equal(decodePart(b64, { encoding: "base64", charset: "utf-8" }), s);
   }
+});
+
+// ---- review round 2 ---------------------------------------------------------------
+
+test("HTML too large to parse safely is stripped linearly (no quadratic parse, no huge DOM)", () => {
+  const cases: [string, string][] = [
+    ["400k unclosed <b>", "<b>".repeat(400_000) + "text"],
+    ["500k <br> (2 MB)", "<br>".repeat(500_000)],
+    ["100k <b> then 100k unmatched </i>", "<b>".repeat(100_000) + "</i>".repeat(100_000)],
+    ["500k '<a' without '>'", "<a".repeat(500_000)],
+    ["200k '<style' without a closing tag", "<style>".repeat(200_000)],
+  ];
+  for (const [name, html] of cases) {
+    const { ms } = timed(() => readableBody({ html }));
+    assert.ok(ms < 1500, `${name} took ${Math.round(ms)} ms`);
+  }
+  // Just under the tag cap the real parser runs and is still fast enough.
+  const { ms } = timed(() => htmlToPlain("<b>".repeat(15_000) + "</i>".repeat(14_000) + "x"));
+  assert.ok(ms < 3000, `parse at the cap took ${Math.round(ms)} ms`);
+});
+
+test("the linear stripper keeps text, links, entities and line breaks", () => {
+  const html =
+    '<style>.a{}</style><p>Hello &amp; welcome</p><a href="https://x.example/a">Shop</a><br>Line<!-- c > d -->end &#8364;' +
+    "<i></i>".repeat(20_000);
+  assert.equal(htmlToPlain(html), "Hello & welcome\nShop <https://x.example/a>\nLineend €");
+});
+
+test("mso-hide:all blocks (Outlook buttons) are kept", () => {
+  const out = htmlToPlain('<div style="mso-hide:all"><a href="https://x.example/buy">Buy now</a></div>');
+  assert.match(out, /Buy now <https:\/\/x\.example\/buy>/);
+});
+
+test("[n] inside URLs and code is left alone; a mail's own [n] becomes (n)", () => {
+  const { text, links } = footnoteLinks(
+    "See https://shop.example.com/s?filter[0]=a&filter[1]=b and <https://e.example/?ids[0]=7> code: items[0] and m[1][2]; note [2]."
+  );
+  assert.equal(text, "See https://shop.example.com/s?filter[0]=a&filter[1]=b and [1] code: items[0] and m[1][2]; note (2).");
+  assert.deepEqual(links, ["https://e.example/?ids[0]=7"]);
+});
+
+test("a closing bracket that belongs to a long URL is kept", () => {
+  const wiki = "https://en.wikipedia.org/wiki/" + "A".repeat(90) + "_(disambiguation)";
+  const { text, links } = footnoteLinks(`(see ${wiki}).`);
+  assert.equal(text, "(see [1]).");
+  assert.deepEqual(links, [wiki]);
+});
+
+test("a link whose visible text names another host shows the real host", () => {
+  const { text, links } = footnoteLinks(
+    "Sign in at https://www.paypal.com/signin <https://evil.example.net/x> now. Or www.example.com <https://click.example.com/t>. Or Shop <https://evil.example.net/y>."
+  );
+  assert.equal(text, "Sign in at https://www.paypal.com/signin [1 → evil.example.net] now. Or www.example.com [2]. Or Shop [3].");
+  assert.deepEqual(Object.keys(linksIn(text, links)), ["1", "2", "3"]);
+  assert.equal(stripLinks(text).replace(/\s+/g, " "), "Sign in at now. Or www.example.com. Or Shop.");
+  // A page never ends inside such a marker.
+  const w = windowText(text, 0, text.indexOf("evil") + 2);
+  assert.ok(!/\[1[^\]]*$/.test(w.text), w.text);
+});
+
+test("plain-text mail keeps tabs and indentation; trailing spaces go", () => {
+  const r = readableBody({ text: "Name\tQty\nApple\t3\n    indented code\nend   " });
+  assert.equal(r.text, "Name\tQty\nApple\t3\n    indented code\nend");
+});
+
+test("junk text/plain cleanup keeps <https://...> links, <addresses> and line breaks", () => {
+  const out = cleanJunkPlain("<td>Hi</td>\nSee <https://a.example/x> or write <me@example.com>\nBye");
+  assert.match(out, /<https:\/\/a\.example\/x>/);
+  assert.match(out, /<me@example\.com>/);
+  assert.match(out, /\nBye$/);
+});
+
+test("a body over the input cap is reported as capped", () => {
+  assert.equal(readableBody({ text: "a ".repeat(MAX_PLAIN_CHARS / 2 + 10) }).capped, true);
+  assert.equal(readableBody({ text: "short" }).capped, false);
+});
+
+test("windowText with max 1 still pages through emoji", () => {
+  const s = "😀😀😀";
+  let off = 0;
+  let rebuilt = "";
+  for (let i = 0; i < 10; i++) {
+    const w = windowText(s, off, 1);
+    rebuilt += w.text;
+    if (!w.truncated) break;
+    off = w.next_offset!;
+  }
+  assert.equal(rebuilt, s);
 });

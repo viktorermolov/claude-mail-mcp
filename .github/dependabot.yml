@@ -11,16 +11,24 @@ updates:
       default-days: 7
     open-pull-requests-limit: 5
     groups:
+      # Minor/patch bumps are grouped; each major gets its own PR.
       runtime:
         dependency-type: production
+        update-types: [minor, patch]
       dev:
         dependency-type: development
+        update-types: [minor, patch]
   - package-ecosystem: docker
     directory: /
     schedule:
       interval: weekly
     cooldown:
       default-days: 7
+    # Build and runtime images must share a Node major (distroless nodejs24);
+    # move both by hand. Digest and minor bumps still come in.
+    ignore:
+      - dependency-name: node
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: docker-compose
     directory: /
     schedule:

@@ -13,7 +13,7 @@ Only the latest release on `main` (currently 0.6.x) is supported.
 ## What the connector can and cannot do
 
 - **No sending.** There is no send tool, no SMTP code and no SMTP credentials. Drafts are composed locally (plain text only) and APPENDed to Drafts; the user sends them from their own mail client.
-- **No permanent deletion.** Nothing sends a plain `EXPUNGE` or `CLOSE`. The only removal is `UID EXPUNGE` of exactly one message, and only after the server confirmed its copy in another folder (`COPYUID`). "Delete" moves to Trash; nothing can be removed from Trash; moving out of Trash (restore) is allowed. `update_draft` moves the previous version to Trash. Servers without `UIDPLUS` are refused. This is pinned by protocol-level tests against a fake IMAP server.
+- **No permanent deletion.** Nothing sends a plain `EXPUNGE` or `CLOSE`. Without IMAP `MOVE` (iCloud) the only removal is `UID EXPUNGE` of exactly one message, and only after the server confirmed its copy in another folder (`COPYUID`); with `MOVE` the server's atomic command is used. Every write first checks that the message exists. "Delete" moves to Trash; nothing can be removed from Trash; moving out of Trash (restore) is allowed. `update_draft` moves the previous version to Trash. Servers without `UIDPLUS` are refused. This is pinned by protocol-level tests against a fake IMAP server.
 - **Reading never marks mail as read** (EXAMINE + BODY.PEEK only).
 - **No calendar or contacts.**
 
@@ -23,7 +23,7 @@ Only the latest release on `main` (currently 0.6.x) is supported.
 |---|---|
 | Internet | Reachable only through a Cloudflare Tunnel; no published ports. The hostname is a Cloudflare Access application with Managed OAuth (DCR + PKCE) and an allow-list policy. |
 | Requests that bypass Access (another tunnel route, a process on the host) | The origin validates every `Cf-Access-Jwt-Assertion`: RS256 signature against the team's keys, issuer, audience (AUD tag), required and unexpired `exp`, e-mail allow-list. The request body is parsed only after that check, limited to 1 MB, no compression. |
-| Anyone who can send mail to the account | All parsing is bounded: linear-time text processing, input size caps, HTML depth limit, per-operation IMAP deadlines. Mail content is declared untrusted to the model (server instructions + read-tool descriptions); destructive tools carry `destructiveHint`. Drafts are text-only, so injected HTML can't make a client fetch remote URLs. |
+| Anyone who can send mail to the account | All parsing is bounded: linear-time text processing, input size caps, HTML with more than 30 000 tags stripped linearly instead of parsed (the parser is quadratic in nesting and builds a full DOM), per-operation IMAP deadlines that also cancel the operation. Mail content is declared untrusted to the model (server instructions + read-tool descriptions); destructive tools carry `destructiveHint`. Drafts are text-only, so injected HTML can't make a client fetch remote URLs. |
 | Supply chain | Lockfile + `npm ci --ignore-scripts`; base images pinned by digest; GitHub Actions pinned by SHA; Dependabot with a 7-day cooldown; weekly scheduled CI with `npm audit`. |
 | Local host | The container runs as a dedicated unprivileged user with a read-only root filesystem, no capabilities and `no-new-privileges`; the credentials file is `600` for that user only. **Membership in the host's `docker` group is equivalent to root and therefore to reading the mail credentials** — keep that group to people and services you trust with the mailbox. |
 

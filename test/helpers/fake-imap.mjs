@@ -231,7 +231,8 @@ export class FakeImapServer {
         conn.selected = name; conn.readOnly = cmd === "EXAMINE";
         const b = this.boxes.get(name);
         w(`* FLAGS (\\Answered \\Flagged \\Deleted \\Seen \\Draft)`);
-        w(`* OK [PERMANENTFLAGS (${b.permanentFlags.join(" ")})] ok`);
+        // Like real servers (RFC 3501 6.3.2), EXAMINE reports no permanent flags.
+        w(`* OK [PERMANENTFLAGS (${conn.readOnly ? "" : b.permanentFlags.join(" ")})] ok`);
         w(`* ${b.messages.length} EXISTS`);
         w(`* 0 RECENT`);
         w(`* OK [UIDVALIDITY ${b.uidValidity}] ok`);
@@ -282,6 +283,27 @@ export class FakeImapServer {
         if (this.opts.copyUidOff) return w(`${tag} OK done`);
         return w(`${tag} OK [COPYUID ${d.uidValidity} ${src.join(",")} ${dst.join(",")}] done`);
       }
+      case "UID MOVE": {
+        if (!this.opts.caps.includes("MOVE")) return w(`${tag} BAD unknown command ${cmd}`);
+        if (!box) return w(`${tag} BAD not selected`);
+        if (conn.readOnly) return w(`${tag} NO read-only`);
+        const dest = this.resolve(args[1]);
+        if (!dest) return w(`${tag} NO [TRYCREATE] no such mailbox`);
+        const d = this.boxes.get(dest);
+        const max = box.messages.at(-1)?.uid ?? 0;
+        const src = [], dst = [];
+        for (let i = box.messages.length - 1; i >= 0; i--) {
+          const m = box.messages[i];
+          if (!inSet(args[0], m.uid, max)) continue;
+          const nu = d.uidNext++;
+          d.messages.push({ uid: nu, flags: new Set(m.flags), raw: m.raw, id: m.id });
+          src.unshift(m.uid); dst.unshift(nu);
+          box.messages.splice(i, 1);
+          w(`* ${i + 1} EXPUNGE`);
+        }
+        if (src.length && !this.opts.copyUidOff) w(`* OK [COPYUID ${d.uidValidity} ${src.join(",")} ${dst.join(",")}] moved`);
+        return w(`${tag} OK done`);
+      }
       case "UID STORE": case "STORE": {
         if (!box) return w(`${tag} BAD not selected`);
         if (conn.readOnly) return w(`${tag} NO read-only`);
@@ -313,7 +335,9 @@ export class FakeImapServer {
         const crit = flat(args).map((s) => String(s).toUpperCase());
         const hits = box.messages
           .map((m, i) => ({ m, key: cmd === "UID SEARCH" ? m.uid : i + 1 }))
-          .filter(({ m }) => (crit.includes("UNSEEN") ? !m.flags.has("\\Seen") : true));
+          .filter(({ m }) => (crit.includes("UNSEEN") ? !m.flags.has("\\Seen") : true))
+          // A bare sequence set ("SEARCH 5") filters by message number.
+          .filter((_h, i) => crit.filter((c) => /^[\d:*,]+$/.test(c)).every((c) => inSet(c, i + 1, box.messages.length)));
         w(`* SEARCH ${hits.map((h) => h.key).join(" ")}`.trimEnd());
         return w(`${tag} OK done`);
       }

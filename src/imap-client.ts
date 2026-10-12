@@ -28,6 +28,7 @@ import {
   looksLikeHtmlJunk,
   htmlToPlain,
   cleanJunkPlain,
+  PREVIEW_HTML_TAGS,
   type BodySource,
 } from "./body-text.js";
 
@@ -101,7 +102,7 @@ export interface MessageDetail extends MessageSummary {
   textSource: BodySource;
   /** Raw HTML part, if any. */
   html: string | null;
-  /** True when the message was too large to read whole and text parts were capped. */
+  /** True when the message was too large to read whole, or its text was longer than the input cap. */
   partial: boolean;
   attachments: Array<{
     filename: string | null;
@@ -126,19 +127,28 @@ export interface SearchCriteria {
 export class NothingChangedError extends Error {}
 
 export class ImapTimeoutError extends Error {
-  constructor(operation: string, ms: number) {
+  constructor(operation: string, ms: number, started: boolean) {
     super(
-      `IMAP ${operation} did not finish within ${Math.round(ms / 1000)} s; the connection was reset. ` +
-        `For writes the outcome is unknown — check the folders before retrying.`
+      started
+        ? `IMAP ${operation} did not finish within ${Math.round(ms / 1000)} s; the connection was reset. ` +
+            `For writes the outcome is unknown — check the folders before retrying.`
+        : `IMAP ${operation} could not start within ${Math.round(ms / 1000)} s (the mail server did not answer in time); nothing was changed.`
     );
     this.name = "ImapTimeoutError";
   }
+}
+
+/** Operations still running on any client, including ones past their deadline (for the shutdown drain). */
+let runningOperations = 0;
+export function runningImapOperations(): number {
+  return runningOperations;
 }
 
 export class ImapClient {
   private client: ImapFlow | null = null;
   private connecting: Promise<ImapFlow> | null = null;
   private closed = false;
+  private active = 0;
   private failures = 0;
   private retryAt = 0;
   private lastConnectError = "";
@@ -182,7 +192,14 @@ export class ImapClient {
       };
       client.on("error", (err: Error) => {
         drop();
-        this.log("warn", "imap connection error", { account: this.accountId, code: errorCode(err) });
+        const code = errorCode(err);
+        // The socket timeout also fires on an idle connection with no
+        // mailbox selected; that is routine, not a failure.
+        const idle = code === "ETIMEOUT" && this.active === 0;
+        this.log(idle ? "debug" : "warn", idle ? "idle imap connection closed" : "imap connection error", {
+          account: this.accountId,
+          code,
+        });
       });
       client.on("close", drop);
       try {
@@ -263,26 +280,46 @@ export class ImapClient {
 
   /**
    * Run `fn` with a connection under the operation deadline. On expiry the
-   * connection is dropped: imapflow rejects everything still queued on it
-   * and the next call reconnects. Write paths are safe to interrupt at any
-   * point — the original is only touched after its copy is confirmed.
+   * `expired` signal is aborted and the connection is dropped: imapflow
+   * rejects everything still queued on it, a call still waiting for the
+   * connection never starts, and write paths check the signal before their
+   * first change. Write paths are safe to interrupt at any point — the
+   * original is only touched after its copy is confirmed.
    */
-  private async withConnection<T>(operation: string, fn: (client: ImapFlow) => Promise<T>): Promise<T> {
+  private async withConnection<T>(
+    operation: string,
+    fn: (client: ImapFlow, expired: AbortSignal) => Promise<T>
+  ): Promise<T> {
     const ms = IMAP_TIMEOUTS.operationMs;
+    const expiry = new AbortController();
+    let started = false;
     let timer: NodeJS.Timeout | undefined;
-    const work = (async () => fn(await this.ensureConnected()))();
+    this.active++;
+    runningOperations++;
+    const work = (async () => {
+      const client = await this.ensureConnected();
+      if (expiry.signal.aborted) throw new ImapTimeoutError(operation, ms, false);
+      started = true;
+      return fn(client, expiry.signal);
+    })();
+    void work
+      .catch(() => {})
+      .finally(() => {
+        this.active--;
+        runningOperations--;
+      });
     const deadline = new Promise<never>((_, reject) => {
       timer = setTimeout(() => {
-        this.log("warn", "imap operation timed out", { account: this.accountId, operation, ms });
-        this.dropConnection();
-        reject(new ImapTimeoutError(operation, ms));
+        expiry.abort();
+        this.log("warn", "imap operation timed out", { account: this.accountId, operation, ms, started });
+        if (started) this.dropConnection();
+        reject(new ImapTimeoutError(operation, ms, started));
       }, ms);
     });
     try {
       return await Promise.race([work, deadline]);
     } finally {
       clearTimeout(timer);
-      work.catch(() => {});
     }
   }
 
@@ -441,10 +478,13 @@ export class ImapClient {
     signal?: AbortSignal
   ): Promise<void> {
     assertUid(uid);
-    await this.withConnection("STORE", async (client) => {
+    await this.withConnection("STORE", async (client, expired) => {
       const lock = await this.lock(client, mailbox, false);
       try {
-        checkNotAborted(signal);
+        // STORE on a missing UID is still "OK" on the wire.
+        const msg = await client.fetchOne(`${uid}`, { flags: true }, { uid: true });
+        if (!msg) throw new NothingChangedError(`Message UID ${uid} not found in ${mailbox}.`);
+        checkNotAborted(signal, expired);
         const ok = on
           ? await client.messageFlagsAdd(`${uid}`, [flag], { uid: true })
           : await client.messageFlagsRemove(`${uid}`, [flag], { uid: true });
@@ -460,13 +500,22 @@ export class ImapClient {
    * message's UID when the server reports it (APPENDUID).
    */
   async appendDraft(draftsFolder: string, raw: Buffer, signal?: AbortSignal): Promise<number | undefined> {
-    return this.withConnection("APPEND", async (client) => {
+    return this.withConnection("APPEND", async (client, expired) => {
       const folders = await this.folders(client);
       const drafts = resolveMailbox(folders, draftsFolder);
-      checkNotAborted(signal);
-      const res = await client.append(drafts, raw, ["\\Draft", "\\Seen"]);
-      if (!res) throw new Error(`Saving the draft to ${drafts} failed.`);
-      return typeof res.uid === "number" ? res.uid : undefined;
+      // imapflow keeps only the APPEND flags the *selected* mailbox lists in
+      // PERMANENTFLAGS; after a read that is an EXAMINEd folder answering
+      // "PERMANENTFLAGS ()", which would drop \Draft and \Seen. Selecting
+      // Drafts read-write first makes them stick.
+      const lock = await this.lock(client, drafts, false);
+      try {
+        checkNotAborted(signal, expired);
+        const res = await client.append(drafts, raw, ["\\Draft", "\\Seen"]);
+        if (!res) throw new Error(`Saving the draft to ${drafts} failed.`);
+        return typeof res.uid === "number" ? res.uid : undefined;
+      } finally {
+        lock.release();
+      }
     });
   }
 
@@ -493,14 +542,14 @@ export class ImapClient {
     signal?: AbortSignal
   ): Promise<{ newUid?: number; destination: string }> {
     assertUid(uid);
-    return this.withConnection("move", async (client) => {
+    return this.withConnection("move", async (client, expired) => {
       const folders = await this.folders(client);
       const source = resolveMailbox(folders, sourceMailbox);
       const destination = resolveMailbox(folders, destinationMailbox);
       if (source === destination) {
         throw new NothingChangedError(`Source and destination are the same folder (${source}).`);
       }
-      const newUid = await this.moveLocked(client, source, uid, destination, signal);
+      const newUid = await this.moveLocked(client, source, uid, destination, anySignal(signal, expired));
       return { newUid, destination };
     });
   }
@@ -516,7 +565,7 @@ export class ImapClient {
     signal?: AbortSignal
   ): Promise<string> {
     assertUid(uid);
-    return this.withConnection("trash", async (client) => {
+    return this.withConnection("trash", async (client, expired) => {
       const folders = await this.folders(client);
       const source = resolveMailbox(folders, mailbox);
       const trash = trashPath(folders, trashFolder);
@@ -525,7 +574,7 @@ export class ImapClient {
           `Message is already in ${trash}. Removing messages from Trash is not supported by this connector.`
         );
       }
-      await this.moveLocked(client, source, uid, trash, signal);
+      await this.moveLocked(client, source, uid, trash, anySignal(signal, expired));
       return trash;
     });
   }
@@ -549,13 +598,16 @@ export class ImapClient {
     signal?: AbortSignal
   ): Promise<{ newUid: number; oldMovedTo: string }> {
     assertUid(oldUid);
-    return this.withConnection("update draft", async (client) => {
+    return this.withConnection("update draft", async (client, expired) => {
       if (!client.capabilities.has("UIDPLUS")) {
         throw new NothingChangedError("IMAP server lacks UIDPLUS; refusing to replace drafts.");
       }
       const folders = await this.folders(client);
       const drafts = resolveMailbox(folders, draftsFolder);
       const trash = trashPath(folders, trashFolder);
+      if (drafts === trash) {
+        throw new NothingChangedError(`Drafts and Trash are the same folder (${drafts}); refusing to replace drafts.`);
+      }
       const lock = await this.lock(client, drafts, false);
       try {
         const old = await client.fetchOne(`${oldUid}`, { flags: true }, { uid: true });
@@ -563,7 +615,7 @@ export class ImapClient {
         if (!old.flags || !old.flags.has("\\Draft")) {
           throw new NothingChangedError(`UID ${oldUid} in ${drafts} is not marked \\Draft; refusing to replace it.`);
         }
-        checkNotAborted(signal);
+        checkNotAborted(signal, expired);
         const res = await client.append(drafts, raw, ["\\Draft", "\\Seen"]);
         const newUid = res && typeof res.uid === "number" ? res.uid : undefined;
         if (!newUid) {
@@ -597,10 +649,17 @@ export class ImapClient {
     }
     const lock = await this.lock(client, source, false);
     try {
+      // COPY/MOVE/STORE of a missing UID still answer "OK"; check first.
+      const msg = await client.fetchOne(`${uid}`, { flags: true }, { uid: true });
+      if (!msg) throw new NothingChangedError(`Message UID ${uid} not found in ${source}.`);
       checkNotAborted(signal);
       if (hasMove) {
+        // MOVE is atomic on the server: the message is in exactly one
+        // folder whatever happens. Report success only once it is gone
+        // from the source.
         const res = await client.messageMove(`${uid}`, destination, { uid: true });
-        if (!res) throw new Error(`Message UID ${uid} not found in ${source}, or the move failed.`);
+        const still = await client.fetchOne(`${uid}`, { flags: true }, { uid: true });
+        if (!res || still) throw new Error(`Moving UID ${uid} from ${source} to ${destination} was not confirmed; check both folders.`);
         return res.uidMap?.get(uid);
       }
       return await this.copyThenRemove(client, source, uid, destination, (stage, copyUid) =>
@@ -625,7 +684,9 @@ export class ImapClient {
     destination: string,
     failure: (stage: "copy" | "remove", copyUid?: number) => string
   ): Promise<number> {
-    if (source === destination) throw new NothingChangedError("Source and destination are the same folder.");
+    // Callers check this before changing anything; reaching it means a bug,
+    // and something may already have changed, so it is not "nothing changed".
+    if (source === destination) throw new Error("Source and destination are the same folder.");
     const copy = await client.messageCopy(`${uid}`, destination, { uid: true });
     const copyUid = copy && copy.uidMap ? copy.uidMap.get(uid) : undefined;
     if (!copyUid) throw new Error(failure("copy"));
@@ -727,7 +788,7 @@ export class ImapClient {
       // previews are best effort
     }
     for (const [uid, h] of html) {
-      safe(uid, () => previewOf(stripLinks(htmlToPlain(h))));
+      safe(uid, () => previewOf(stripLinks(htmlToPlain(h, { maxTags: PREVIEW_HTML_TAGS }))));
       // Let other requests run between conversions of large HTML previews.
       await new Promise<void>((resolve) => setImmediate(resolve));
     }
@@ -775,10 +836,14 @@ function errorCode(err: unknown): string {
   return "unknown";
 }
 
-function checkNotAborted(signal?: AbortSignal): void {
-  if (signal?.aborted) {
-    throw new NothingChangedError("The request was cancelled before any change was made.");
+function checkNotAborted(...signals: Array<AbortSignal | undefined>): void {
+  if (signals.some((s) => s?.aborted)) {
+    throw new NothingChangedError("The request was cancelled or ran out of time before any change was made.");
   }
+}
+
+function anySignal(...signals: Array<AbortSignal | undefined>): AbortSignal {
+  return AbortSignal.any(signals.filter((s): s is AbortSignal => s !== undefined));
 }
 
 /** Exact match against LIST (INBOX in any case). Refuses unknown or \Noselect names. */
@@ -905,7 +970,7 @@ function detailFromParsed(head: FetchMessageObject, parsed: ParsedMail, partial:
     text: body.text,
     textSource: body.source,
     html: typeof parsed.html === "string" ? parsed.html : null,
-    partial,
+    partial: partial || body.capped,
     attachments: (parsed.attachments ?? []).map((a) => ({
       filename: a.filename ?? null,
       contentType: a.contentType,

@@ -67,7 +67,7 @@ cloudflared tunnel route dns mail-mcp mail.example.com
 Put `deploy/cloudflared/config.yml` (UUID and hostname filled in) and the tunnel credentials JSON into `./cloudflared/`, and delete `cert.pem` afterwards (it can manage every tunnel of the zone). The credentials file must be readable by the cloudflared image's user (uid 65532) only:
 
 ```bash
-sudo chown -R 65532:65532 cloudflared && sudo chmod 700 cloudflared && sudo chmod 600 cloudflared/*.json
+chmod 600 cloudflared/*.json && sudo chown -R 65532:65532 cloudflared && sudo chmod 700 cloudflared
 docker compose --profile tunnel up -d
 ```
 
@@ -89,13 +89,13 @@ Deploy a commit you have looked at, not whatever is on `main`, and keep the prev
 ```bash
 git fetch origin
 git log --oneline HEAD..origin/main          # what would change
-git diff HEAD origin/main -- src Dockerfile compose.yaml package-lock.json
+git diff HEAD <reviewed-sha>                 # the whole diff: package.json scripts run during the build
 git merge --ff-only <reviewed-sha>
 docker tag claude-mail-mcp:local claude-mail-mcp:prev
 docker compose build --pull mail-mcp && docker compose --profile tunnel up -d
 docker compose ps                            # mail-mcp: healthy
 ```
 
-Rollback: `docker tag claude-mail-mcp:prev claude-mail-mcp:local && docker compose --profile tunnel up -d --no-build`, then `git reset --hard <previous-sha>`.
+Rollback (checkout first, so compose.yaml matches the old image): `git reset --hard <previous-sha> && docker tag claude-mail-mcp:prev claude-mail-mcp:local && docker compose --profile tunnel up -d --no-build`.
 
-Base images and cloudflared are pinned by digest; Dependabot proposes bumps (with a 7-day cooldown) as pull requests, and a weekly CI run fails when a new advisory affects a dependency.
+Base images and cloudflared are pinned by digest; Dependabot proposes bumps (with a 7-day cooldown) as pull requests, and a weekly CI run fails when a new npm advisory affects a runtime dependency. On a fork, Dependabot version updates must be switched on by hand: Settings → Advanced Security → Dependabot version updates.

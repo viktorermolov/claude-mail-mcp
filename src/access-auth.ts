@@ -14,11 +14,12 @@
  * that `exp` is present and not passed, and that the identity is on the
  * allow-list.
  *
- * Key availability: the team's keys are cached for 12 h, and if fetching
- * them fails (DNS/egress blip) the last good set is used for up to 24 h,
- * so a short outage doesn't turn every valid request into a 401. A key
- * fetch failure with no usable cached keys answers 503, not 401, so the
- * client doesn't mistake it for a revoked token.
+ * Key availability: the team's keys are cached for 1 h, and if fetching
+ * them fails (DNS/egress blip) the last fetched set stands in for up to
+ * 24 h after it was fetched, so a short outage doesn't turn every valid
+ * request into a 401. A key that a successful fetch no longer lists is
+ * never used again. A key fetch failure with no usable cached key answers
+ * 503, not 401, so the client doesn't mistake it for a revoked token.
  */
 
 import type { NextFunction, Request, Response } from "express";
@@ -40,9 +41,9 @@ export interface AccessAuthOptions {
   keys?: JWTVerifyGetKey;
   /** Override where keys are fetched from (tests). Default: the team's /cdn-cgi/access/certs. */
   jwksUrl?: string;
-  /** How long fetched keys are trusted before a refetch (default 12 h). */
+  /** How long fetched keys are trusted before a refetch (default 1 h). */
   cacheMaxAgeMs?: number;
-  /** How long the last good keys may stand in when refetching fails (default 24 h). */
+  /** How long after it was fetched the last key set may stand in when refetching fails (default 24 h). */
   staleIfErrorMs?: number;
   onReject?: (reason: string, req: Request) => void;
 }
@@ -76,33 +77,42 @@ export function accessAuth(opts: AccessAuthOptions): AccessAuthMiddleware {
     keys = opts.keys;
   } else {
     const remote = createRemoteJWKSet(new URL(opts.jwksUrl ?? `${issuer}/cdn-cgi/access/certs`), {
-      cacheMaxAge: opts.cacheMaxAgeMs ?? 12 * HOUR,
+      cacheMaxAge: opts.cacheMaxAgeMs ?? HOUR,
       cooldownDuration: 30_000,
       timeoutDuration: 5_000,
     });
-    let lastGood: { set: JWTVerifyGetKey; at: number } | null = null;
-    const remember = (): void => {
+    // Snapshot of the last fetched key set, stamped when it was fetched.
+    // jose replaces its set object on every successful fetch, so a new
+    // object means a new fetch (and a dropped key disappears from here too).
+    let lastGood: { set: JWTVerifyGetKey; at: number; jwks: object } | null = null;
+    const snapshot = (): void => {
       const jwks = remote.jwks();
-      if (jwks) lastGood = { set: createLocalJWKSet(jwks), at: Date.now() };
+      if (jwks && jwks !== lastGood?.jwks) lastGood = { set: createLocalJWKSet(jwks), at: Date.now(), jwks };
     };
     keys = async (header, token) => {
       try {
-        const key = await remote(header, token);
-        remember();
-        return key;
+        return await remote(header, token);
       } catch (err) {
         if (isKeyFetchError(err) && lastGood && Date.now() - lastGood.at < staleMax) {
-          return lastGood.set(header, token);
+          try {
+            return await lastGood.set(header, token);
+          } catch {
+            // A key we never fetched: still "keys unavailable" (503), not 401.
+            throw err;
+          }
         }
         throw err;
+      } finally {
+        snapshot();
       }
     };
     prefetch = async () => {
       try {
         await remote.reload();
-        remember();
       } catch {
         // retried on the first request
+      } finally {
+        snapshot();
       }
     };
   }

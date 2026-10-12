@@ -24,7 +24,7 @@ Examples of unacceptable behaviour:
 
 ## Enforcement
 
-Instances of abusive, harassing, or otherwise unacceptable behaviour may be reported to **hi@markusstoeger.com**. All complaints will be reviewed and investigated promptly and fairly.
+Instances of abusive, harassing, or otherwise unacceptable behaviour may be reported privately to the maintainer of this fork, [@viktorermolov](https://github.com/viktorermolov), through GitHub. All complaints will be reviewed and investigated promptly and fairly.
 
 ## Attribution
 

@@ -189,7 +189,7 @@ test("a stalled server fails the call within the deadline and the next call reco
   });
   server.addMessage("INBOX", rawMsg("x"));
   const t0 = Date.now();
-  await assert.rejects(imap.getMessage("INBOX", 1), (e: Error) => e instanceof ImapTimeoutError);
+  await assert.rejects(imap.getMessage("INBOX", 1), (e: Error) => e instanceof ImapTimeoutError && /connection was reset/.test(e.message));
   assert.ok(Date.now() - t0 < 2000);
   stall = false;
   const msg = await imap.getMessage("INBOX", 1);
@@ -202,8 +202,104 @@ test("an aborted request changes nothing", async () => {
   server.addMessage("INBOX", rawMsg("x"));
   const ac = new AbortController();
   ac.abort();
-  await assert.rejects(imap.moveToTrash("INBOX", 1, undefined, ac.signal), /cancelled before any change/);
+  await assert.rejects(imap.moveToTrash("INBOX", 1, undefined, ac.signal), /cancelled or ran out of time before any change/);
   assert.ok(!log().some((e) => /COPY|STORE|EXPUNGE/.test(e.cmd)));
+});
+
+/** Answer LOGIN only after `ms` (a slow server during connect). */
+const slowLogin = (ms: number) => ({
+  hooks: {
+    onCommand: (conn: { w: (s: string) => void }, tag: string, cmd: string, _a: unknown, srv: Fake) => {
+      if (cmd !== "LOGIN") return undefined;
+      srv.logins++;
+      setTimeout(() => conn.w(`${tag} OK [CAPABILITY ${srv.opts.caps.join(" ")}] logged in`), ms);
+      return "handled";
+    },
+  },
+});
+
+test("a call that times out while connecting never runs later (no zombie writes)", async () => {
+  Object.assign(IMAP_TIMEOUTS, { operationMs: 300 });
+  await start(slowLogin(700));
+  const { id } = server.addMessage("INBOX", rawMsg("stay"));
+  const raw = await buildDraftSource({ from: "me@example.com" }, { to: "a@example.com", subject: "s", text: "t" });
+  const results = await Promise.allSettled([imap.moveToTrash("INBOX", 1), imap.appendDraft("Drafts", raw)]);
+  for (const r of results) {
+    assert.equal(r.status, "rejected");
+    assert.ok((r as PromiseRejectedResult).reason instanceof ImapTimeoutError);
+    assert.match((r as PromiseRejectedResult).reason.message, /could not start .* nothing was changed/);
+  }
+  await new Promise((r) => setTimeout(r, 1200)); // the connect finishes meanwhile
+  assert.equal(server.find(id)[0].box, "INBOX");
+  assert.equal(server.ids("Drafts").length, 0);
+  assert.ok(!log().some((e) => /APPEND|COPY|STORE|EXPUNGE|MOVE/.test(e.cmd)), "nothing may be written after the deadline");
+});
+
+test("create_draft after a read keeps \\Draft and \\Seen (Drafts selected read-write for APPEND)", async () => {
+  await start();
+  server.addMessage("INBOX", rawMsg("read me"));
+  await imap.listMessages("INBOX", { limit: 5 }); // leaves INBOX EXAMINEd: PERMANENTFLAGS ()
+  const raw = await buildDraftSource({ from: "me@example.com" }, { to: "a@example.com", subject: "d1", text: "t" });
+  const uid = await imap.appendDraft("Drafts", raw);
+  assert.equal(typeof uid, "number");
+  const append = log().find((e) => e.cmd === "APPEND")!;
+  assert.match(append.text, /APPEND "?Drafts"? \(\\Draft \\Seen\)/);
+  assert.equal(append.selected, "Drafts");
+  assert.equal(append.readOnly, false);
+  // ...so update_draft accepts it.
+  const raw2 = await buildDraftSource({ from: "me@example.com" }, { to: "a@example.com", subject: "d2", text: "t2" });
+  await imap.replaceDraft("Drafts", uid!, raw2);
+  assertNoForbiddenCommands();
+});
+
+test("with IMAP MOVE: missing UID refused before any write; success needs the source to be empty", async () => {
+  await start({ caps: ["IMAP4rev1", "UIDPLUS", "MOVE", "IDLE", "NAMESPACE", "LITERAL+"] });
+  const { id } = server.addMessage("INBOX", rawMsg("m"));
+  await assert.rejects(imap.moveMessage("INBOX", 99, "Archive"), /UID 99 not found/);
+  assert.ok(!log().some((e) => /MOVE|COPY|STORE|EXPUNGE/.test(e.cmd)));
+  const r = await imap.moveMessage("INBOX", 1, "Archive");
+  assert.equal(r.newUid, 1);
+  assert.equal(server.find(id)[0].box, "Archive");
+  assert.deepEqual(log().filter((e) => /MOVE|COPY|STORE|EXPUNGE/.test(e.cmd)).map((e) => e.cmd), ["UID MOVE"]);
+});
+
+test("flag changes on a missing UID are refused, not reported as done", async () => {
+  await start();
+  server.addMessage("INBOX", rawMsg("f"));
+  await assert.rejects(imap.markFlagged("INBOX", 42, true), /UID 42 not found/);
+  assert.ok(!log().some((e) => /STORE/.test(e.cmd)));
+  await imap.markRead("INBOX", 1, true);
+  assert.ok(server.boxes.get("INBOX").messages[0].flags.has("\\Seen"));
+});
+
+test("update_draft with Drafts == Trash is refused before the APPEND", async () => {
+  await start();
+  server.addMessage("Drafts", rawMsg("v1"), ["\\Draft"]);
+  const raw = await buildDraftSource({ from: "me@example.com" }, { to: "a@example.com", subject: "v2", text: "t" });
+  await assert.rejects(imap.replaceDraft("Drafts", 1, raw, "Drafts"), /same folder/);
+  assert.ok(!log().some((e) => /APPEND|COPY|STORE|EXPUNGE/.test(e.cmd)));
+});
+
+test("update_draft without APPENDUID: the new UID comes from the selected Drafts, the old version still needs COPYUID", async () => {
+  // Drafts is selected while appending, so imapflow learns the new UID from
+  // the EXISTS update; the removal of the old version depends only on COPYUID.
+  await start({ appendUidOff: true });
+  const { id } = server.addMessage("Drafts", rawMsg("v1"), ["\\Draft"]);
+  const raw = await buildDraftSource({ from: "me@example.com" }, { to: "a@example.com", subject: "v2", text: "t" });
+  const r = await imap.replaceDraft("Drafts", 1, raw);
+  assert.equal(r.newUid, server.boxes.get("Drafts").messages.at(-1).uid);
+  assert.equal(server.find(id)[0].box, "Deleted Messages");
+  assertNoForbiddenCommands();
+});
+
+test("close() while a connect is in flight: the call fails and no socket survives", async () => {
+  await start(slowLogin(300));
+  const pending = imap.listMailboxes();
+  await new Promise((r) => setTimeout(r, 50));
+  await imap.close();
+  await assert.rejects(pending, /closed/);
+  await new Promise((r) => setTimeout(r, 100));
+  assert.equal(server.sockets.size, 0);
 });
 
 test("close() during use leaves no live connection behind", async () => {

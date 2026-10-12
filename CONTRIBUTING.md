@@ -1,40 +1,34 @@
 # Contributing
 
-Thanks for considering a contribution. This project is small and aims to stay small — one focused MCP connector for IMAP, SMTP and CalDAV.
+This is a personal fork of [maxx3250/claude-mail-mcp](https://github.com/maxx3250/claude-mail-mcp), cut down to a read-and-organise IMAP connector for iCloud. It deliberately has **no sending, no permanent deletion, no calendar and no contacts** — changes that add any of these won't be accepted. See [SECURITY.md](SECURITY.md) for the exact rules.
 
 ## Before you open a PR
 
-- For non-trivial changes, open an issue first so we can align on scope.
-- New tools should map cleanly onto an IMAP, SMTP or CalDAV verb. If you find yourself bolting in business logic (auto-categorization, scoring, summarization), that probably belongs on the Claude side, not in the connector.
-- Match the existing code style (TypeScript strict, ES modules, 2-space indent).
+- For non-trivial changes, open an issue first so we can agree on scope.
+- New tools should map onto a single IMAP operation. Business logic (categorising, scoring, summarising) belongs on the Claude side.
+- Match the existing style (TypeScript strict, ES modules, 2-space indent). Code that handles message content runs on attacker-controlled input: keep regexes linear-time and inputs bounded.
 
 ## Local development
 
 ```bash
-git clone https://github.com/maxx3250/claude-mail-mcp.git
+git clone https://github.com/viktorermolov/claude-mail-mcp.git
 cd claude-mail-mcp
-npm install
-cp .env.example .env
-# Fill in IMAP_*, SMTP_*, DEFAULT_FROM, AUTH_TOKEN
-npm run dev   # tsx watch mode
+npm ci --ignore-scripts
+npm run build
+npm test
 ```
 
-## Testing against a real mailbox
+The tests need no mailbox: write paths are tested at the protocol level against a fake IMAP server (`test/helpers/fake-imap.mjs`), which records every command, so the removal rules (single-UID `UID EXPUNGE` after a confirmed `COPYUID`, nothing removed from Trash, no plain `EXPUNGE`/`CLOSE`) are pinned by assertions on the wire. Add a wire test for every change to a write path.
 
-The fastest loop is:
+Don't try write tools against a real mailbox while iterating. If you must check something against iCloud, use read-only tools only.
 
-1. Point `.env` at a test mailbox (Mailbox.org has a 30-day free trial, Fastmail also offers trials).
-2. `npm run dev`
-3. Hit `/mcp` with `curl` and a hand-rolled JSON-RPC request, or use the MCP Inspector (`npx @modelcontextprotocol/inspector`).
-
-Avoid running tools against your primary inbox while iterating — `delete_message` is destructive and `send_message` actually sends.
-
-## Code review checklist
+## Review checklist
 
 - [ ] No new dependencies unless really needed
 - [ ] Tool inputs validated with Zod schemas
-- [ ] IMAP calls hold a mailbox lock (`getMailboxLock`) for the whole operation
-- [ ] Errors propagate as plain `Error` with a useful message
+- [ ] IMAP calls hold a mailbox lock for the whole operation; reads use EXAMINE and BODY.PEEK
+- [ ] Writes check that the target exists and verify the result before reporting success
+- [ ] Fixtures are synthetic (no real mail, names or addresses)
 - [ ] README / CHANGELOG updated if user-visible behaviour changes
 
 ## Reporting security issues
