@@ -50,9 +50,12 @@ sudoedit secrets/accounts.json   # put the app-specific password into imap.pass
 ## 4. Start the server
 
 ```bash
-docker compose up -d --build
+docker buildx build --allow network.host --network host --pull -t claude-mail-mcp:local .
+docker compose up -d --no-build
 docker compose ps                # mail-mcp: healthy
 ```
+
+The build runs on the host network so `npm ci` can use the host's resolver (on hosts whose DNS upstreams are IPv6-only the default build network can't resolve). Since Docker 29 that needs the explicit `--allow network.host` entitlement, which `docker compose build` cannot pass, so the image is built with `docker buildx` and compose only runs it. On hosts with ordinary DNS, `docker compose up -d --build` also works.
 
 The container has a read-only root filesystem, drops all capabilities, runs with `no-new-privileges`, and the runtime image (distroless) has no shell.
 
@@ -92,9 +95,12 @@ git log --oneline HEAD..origin/main          # what would change
 git diff HEAD <reviewed-sha>                 # the whole diff: package.json scripts run during the build
 git merge --ff-only <reviewed-sha>
 docker tag claude-mail-mcp:local claude-mail-mcp:prev
-docker compose build --pull mail-mcp && docker compose --profile tunnel up -d
+docker buildx build --allow network.host --network host --pull -t claude-mail-mcp:local .
+docker compose --profile tunnel up -d --no-build
 docker compose ps                            # mail-mcp: healthy
 ```
+
+Merge only commits whose CI is green (`main` is protected: changes land through pull requests with passing `test` and `docker` checks). If the checkout is owned by root so that the desktop/Samba user can't modify the code that gets built, run the `git` steps with `sudo`; the build and compose steps only need read access.
 
 Rollback (checkout first, so compose.yaml matches the old image): `git reset --hard <previous-sha> && docker tag claude-mail-mcp:prev claude-mail-mcp:local && docker compose --profile tunnel up -d --no-build`.
 

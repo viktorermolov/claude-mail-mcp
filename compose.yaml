@@ -17,7 +17,9 @@ services:
     build:
       context: .
       # Build steps use the host's resolver (some hosts only have IPv6 DNS
-      # upstreams, which the default build network cannot reach).
+      # upstreams, which the default build network cannot reach). Docker 29+
+      # needs `docker buildx build --allow network.host` for this; see
+      # docs/DEPLOYMENT.md.
       network: host
     image: claude-mail-mcp:local
     # Host user that owns ./secrets (see docs/DEPLOYMENT.md).
