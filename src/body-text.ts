@@ -97,9 +97,24 @@ export function readableBody(parsed: {
   }
   if (plain.trim()) {
     // Junky text/plain and no HTML part: strip what we can.
-    return { text: htmlToPlain(plain), source: "text" };
+    return { text: cleanJunkPlain(plain), source: "text" };
   }
   return { text: "", source: "none" };
+}
+
+/**
+ * Best effort for a text/plain part full of HTML/MSO leftovers when there
+ * is no HTML part to fall back to: drop tags and comments, then the
+ * Markdown-style image and table residue some generators emit.
+ */
+export function cleanJunkPlain(text: string): string {
+  return tidy(
+    htmlToPlain(text)
+      .replace(/!\[[^\]]*\]\([^)]*\)/g, "")
+      .replace(/^[ \t|]+$/gm, "")
+      .replace(/^\s*\|\s?|\s?\|\s*$/gm, "")
+      .replace(/^#{1,6}\s+/gm, "")
+  );
 }
 
 /** A one-line preview of at most `max` characters. */
@@ -141,4 +156,44 @@ export function windowText(full: string, offset: number, max: number): TextWindo
     truncated: end < total,
     next_offset: end < total ? end : null,
   };
+}
+
+/**
+ * Replace inline "label <url>" links with numbered references "label [n]"
+ * and return the URLs separately. Tracking URLs can be hundreds of
+ * characters and can't be shortened without breaking them; moving them
+ * out of the prose keeps the text readable and lets callers skip them.
+ * Repeated URLs share one number.
+ */
+export function footnoteLinks(text: string): { text: string; links: string[] } {
+  const links: string[] = [];
+  const index = new Map<string, number>();
+  const out = text.replace(/\s?<((?:https?|mailto):[^\s<>]+)>/gi, (_m, url: string) => {
+    let n = index.get(url);
+    if (n === undefined) {
+      links.push(url);
+      n = links.length;
+      index.set(url, n);
+    }
+    return ` [${n}]`;
+  });
+  return { text: out, links };
+}
+
+/** Links referenced as [n] inside a piece of text, keyed by number. */
+export function linksIn(text: string, links: string[]): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const m of text.matchAll(/\[(\d+)\]/g)) {
+    const n = Number(m[1]);
+    if (n >= 1 && n <= links.length) out[n] = links[n - 1];
+  }
+  return out;
+}
+
+/** Text for one-line previews: no URLs, no reference markers. */
+export function stripLinks(text: string): string {
+  return text
+    .replace(/\s?<(?:https?|mailto):[^\s<>]+>/gi, "")
+    .replace(/\s?\[\d+\]/g, "")
+    .replace(/\bhttps?:\/\/\S+/gi, "");
 }

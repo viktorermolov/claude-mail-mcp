@@ -18,10 +18,19 @@
 
 import { ImapFlow, ImapFlowOptions, FetchMessageObject } from "imapflow";
 import { simpleParser, ParsedMail } from "mailparser";
-import { readableBody, previewOf, type BodySource } from "./body-text.js";
+import {
+  readableBody,
+  previewOf,
+  stripLinks,
+  looksLikeHtmlJunk,
+  htmlToPlain,
+  cleanJunkPlain,
+  type BodySource,
+} from "./body-text.js";
 
-/** How much of each message source list/search fetch to build previews. */
-const PREVIEW_SOURCE_BYTES = 24 * 1024;
+/** Byte caps for the decoded text part fetched to build a preview. */
+const PREVIEW_PLAIN_BYTES = 8 * 1024;
+const PREVIEW_HTML_BYTES = 64 * 1024;
 
 export interface ImapAuth {
   host: string;
@@ -230,7 +239,7 @@ export class ImapClient {
           ? parsed.cc.map((a) => a.text).join(", ")
           : parsed.cc?.text ?? null,
         size: (msg.size as number | undefined) ?? null,
-        preview: previewOf(body.text),
+        preview: previewOf(stripLinks(body.text)),
         messageId: parsed.messageId ?? null,
         inReplyTo: parsed.inReplyTo ?? null,
         references: Array.isArray(parsed.references)
@@ -458,19 +467,52 @@ export class ImapClient {
     range: string,
     byUid: boolean
   ): Promise<MessageSummary[]> {
-    const out: MessageSummary[] = [];
+    const fetched: FetchMessageObject[] = [];
     const fetchOpts = {
       envelope: true,
       flags: true,
       internalDate: true,
       size: true,
-      // The head of the raw message is enough to parse a preview.
-      source: { start: 0, maxLength: PREVIEW_SOURCE_BYTES },
+      bodyStructure: true,
     };
     for await (const msg of client.fetch(range, fetchOpts, { uid: byUid })) {
-      out.push(await summarize(msg));
+      fetched.push(msg);
+    }
+    // Commands can't be issued while a FETCH is streaming, so previews are
+    // downloaded afterwards, one text part per message.
+    const out: MessageSummary[] = [];
+    for (const msg of fetched) {
+      out.push({ ...summarize(msg), preview: await this.previewFor(client, msg) });
     }
     return out;
+  }
+
+  /**
+   * Preview from the message's own text part: download (decoded, charset
+   * converted, size-capped) text/plain, or text/html when the plain part is
+   * missing or full of HTML leftovers.
+   */
+  private async previewFor(client: ImapFlow, msg: FetchMessageObject): Promise<string | null> {
+    const parts = textParts(msg.bodyStructure);
+    const get = async (part: string, maxBytes: number): Promise<string> => {
+      const { content } = await client.download(`${msg.uid}`, part, { uid: true, maxBytes });
+      const chunks: Buffer[] = [];
+      for await (const chunk of content) chunks.push(chunk as Buffer);
+      return Buffer.concat(chunks).toString("utf8");
+    };
+    try {
+      if (parts.plain) {
+        const plain = await get(parts.plain, PREVIEW_PLAIN_BYTES);
+        if (plain.trim() && !looksLikeHtmlJunk(plain)) return previewOf(stripLinks(plain));
+        if (!parts.html) return previewOf(stripLinks(cleanJunkPlain(plain)));
+      }
+      if (parts.html) {
+        return previewOf(stripLinks(htmlToPlain(await get(parts.html, PREVIEW_HTML_BYTES))));
+      }
+    } catch {
+      // No preview rather than a failed listing.
+    }
+    return null;
   }
 }
 
@@ -495,21 +537,8 @@ function addrText(
   );
 }
 
-async function summarize(msg: FetchMessageObject): Promise<MessageSummary> {
+function summarize(msg: FetchMessageObject): MessageSummary {
   const env = msg.envelope;
-  let preview: string | null = null;
-  if (msg.source) {
-    try {
-      const parsed = await simpleParser(msg.source as Buffer, {
-        skipImageLinks: true,
-        skipTextLinks: true,
-        skipTextToHtml: true,
-      });
-      preview = previewOf(readableBody(parsed).text);
-    } catch {
-      // A truncated or malformed source just means no preview.
-    }
-  }
   return {
     uid: msg.uid as number,
     seq: msg.seq as number,
@@ -520,8 +549,32 @@ async function summarize(msg: FetchMessageObject): Promise<MessageSummary> {
     to: addrText(env?.to),
     cc: addrText(env?.cc),
     size: (msg.size as number | undefined) ?? null,
-    preview,
+    preview: null,
   };
+}
+
+type StructureNode = NonNullable<FetchMessageObject["bodyStructure"]>;
+
+/**
+ * First inline text/plain and text/html parts, skipping attachments and
+ * attached messages. A single-part message is part "1".
+ */
+export function textParts(root: StructureNode | undefined): { plain?: string; html?: string } {
+  const found: { plain?: string; html?: string } = {};
+  const visit = (node: StructureNode, inMessage: boolean): void => {
+    const type = (node.type || "").toLowerCase();
+    if (node.childNodes && node.childNodes.length) {
+      if (type === "message/rfc822") return;
+      for (const child of node.childNodes) visit(child, inMessage);
+      return;
+    }
+    if (inMessage || (node.disposition || "").toLowerCase() === "attachment") return;
+    const part = node.part || "1";
+    if (type === "text/plain" && !found.plain) found.plain = part;
+    if (type === "text/html" && !found.html) found.html = part;
+  };
+  if (root) visit(root, false);
+  return found;
 }
 
 function assertUid(uid: number): void {

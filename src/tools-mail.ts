@@ -17,7 +17,7 @@ import { z } from "zod";
 import { ClientPool } from "./client-pool.js";
 import { AccountsStore } from "./accounts.js";
 import { buildDraftSource } from "./draft-composer.js";
-import { windowText } from "./body-text.js";
+import { windowText, footnoteLinks, linksIn } from "./body-text.js";
 
 const DEFAULT_BODY_CHARS = 15_000;
 
@@ -165,7 +165,7 @@ export function registerMailTools(
     "get_message",
     {
       description:
-        "Fetch one message by UID. Returns headers, threading IDs (Message-ID, In-Reply-To, References), attachment metadata and the body as clean plain text (newsletter HTML is converted; images and styles dropped, links kept as `label <url>`). Long bodies are paged: if `truncated` is true, call again with `offset` = `next_offset`. Raw HTML only with include_html: true.",
+        "Fetch one message by UID. Returns headers, threading IDs (Message-ID, In-Reply-To, References), attachment metadata and the body as clean plain text (newsletter HTML is converted; images and styles dropped). Links appear as numbered references like `Sign up [3]`; `body.links` maps the numbers used on this page to URLs. Long bodies are paged: if `truncated` is true, call again with `offset` = `next_offset`. Raw HTML only with include_html: true.",
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
       inputSchema: {
         mailbox: z.string().describe("IMAP folder the message lives in"),
@@ -187,6 +187,10 @@ export function registerMailTools(
           .max(100_000)
           .optional()
           .describe(`Max characters of text to return (default ${DEFAULT_BODY_CHARS})`),
+        include_links: z
+          .boolean()
+          .optional()
+          .describe("Return the URLs for [n] link references on this page (default true)"),
         include_html: z
           .boolean()
           .optional()
@@ -195,11 +199,12 @@ export function registerMailTools(
         account: accountSchema,
       },
     },
-    async ({ mailbox, uid, offset, max_length, include_html, html_offset, account }) => {
+    async ({ mailbox, uid, offset, max_length, include_links, include_html, html_offset, account }) => {
       const { imap } = pool.for(account);
       const m = await imap.getMessage(mailbox, uid);
       const max = max_length ?? DEFAULT_BODY_CHARS;
-      const body = windowText(m.text, offset ?? 0, max);
+      const { text, links } = footnoteLinks(m.text);
+      const body = windowText(text, offset ?? 0, max);
       const result: Record<string, unknown> = {
         uid: m.uid,
         mailbox,
@@ -221,6 +226,7 @@ export function registerMailTools(
           total_length: body.total_length,
           truncated: body.truncated,
           next_offset: body.next_offset,
+          ...(include_links === false ? {} : { links: linksIn(body.text, links) }),
         },
         has_html: m.html !== null,
       };
