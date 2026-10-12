@@ -311,3 +311,26 @@ test("windowText with max 1 still pages through emoji", () => {
   }
   assert.equal(rebuilt, s);
 });
+
+test("long bare URLs keep the brackets, quotes and punctuation around them", () => {
+  const url = "https://docs.google.com/forms/d/e/" + "A".repeat(90) + "/viewform?usp=sf_link";
+  const wiki = "https://en.wikipedia.org/wiki/" + "B".repeat(90) + "_(disambiguation)";
+  const cases: [string, string][] = [
+    [`**[Harvest Party sign up](${url})**`, "**[Harvest Party sign up]([1])**"],
+    [`[Sign up](${url})`, "[Sign up]([1])"],
+    [`_[Sign up](${url})_`, "_[Sign up]([1])_"],
+    [`(see ${url})`, "(see [1])"],
+    [`(see ${url}).`, "(see [1])."],
+    [`Sign up at ${url}.`, "Sign up at [1]."],
+    [`Is it ${url}?!`, "Is it [1]?!"],
+    [`“${url}”`, "“[1]”"],
+    [`«${url}»,`, "«[1]»,"],
+    [`{${url}}`, "{[1]}"],
+    [`(${wiki})`, "([1])"],
+  ];
+  for (const [input, expected] of cases) {
+    const { text, links } = footnoteLinks(input);
+    assert.equal(text, expected, input.slice(0, 30));
+    assert.equal(links[0], input.includes(wiki) ? wiki : url, `URL kept whole: ${input.slice(0, 30)}`);
+  }
+});

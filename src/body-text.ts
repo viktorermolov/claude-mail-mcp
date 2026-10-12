@@ -391,30 +391,32 @@ export function footnoteLinks(text: string): { text: string; links: string[] } {
 }
 
 /**
- * Length of a bare URL without trailing sentence punctuation. A closing
- * ")" or "]" is kept while the URL has unmatched opening brackets of that
- * kind (Wikipedia-style "/Foo_(bar)"). Counts once, then a plain loop.
+ * Length of a bare URL without what follows it in the prose: sentence
+ * punctuation, closing quotes, and Markdown emphasis ("**", "_", "~~"
+ * around a link). A closing ")", "]" or "}" is kept only while the URL
+ * has an unmatched opening bracket of that kind (Wikipedia-style
+ * "/Foo_(bar)"), so "[label](https://...)" and "(see https://...)" keep
+ * their own brackets. Counts once, then a plain loop.
  */
+const URL_TRAILERS = ".,;:!?*_~\"'”’»›";
+const CLOSERS: Record<string, string> = { ")": "(", "]": "[", "}": "{" };
+
 function trimUrlEnd(url: string): number {
-  let parens = 0;
-  let squares = 0;
+  const open: Record<string, number> = { ")": 0, "]": 0, "}": 0 };
   for (let i = 0; i < url.length; i++) {
     const c = url[i];
-    if (c === "(") parens++;
-    else if (c === ")") parens--;
-    else if (c === "[") squares++;
-    else if (c === "]") squares--;
+    if (c === "(") open[")"]++;
+    else if (c === "[") open["]"]++;
+    else if (c === "{") open["}"]++;
+    else if (c in CLOSERS) open[c]--;
   }
   let end = url.length;
   while (end > 0) {
     const c = url[end - 1];
-    if (".,;:!?".includes(c)) {
+    if (URL_TRAILERS.includes(c)) {
       end--;
-    } else if (c === ")" && parens < 0) {
-      parens++;
-      end--;
-    } else if (c === "]" && squares < 0) {
-      squares++;
+    } else if (c in CLOSERS && open[c] < 0) {
+      open[c]++;
       end--;
     } else {
       break;
