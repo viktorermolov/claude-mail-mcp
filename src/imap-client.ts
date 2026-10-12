@@ -18,6 +18,21 @@
 
 import { ImapFlow, ImapFlowOptions, FetchMessageObject } from "imapflow";
 import { simpleParser, ParsedMail } from "mailparser";
+import {
+  readableBody,
+  previewOf,
+  stripLinks,
+  looksLikeHtmlJunk,
+  htmlToPlain,
+  cleanJunkPlain,
+  type BodySource,
+} from "./body-text.js";
+
+import libqp from "libqp";
+
+/** Byte caps for the raw text part fetched to build a preview. */
+const PREVIEW_PLAIN_BYTES = 8 * 1024;
+const PREVIEW_HTML_BYTES = 96 * 1024;
 
 export interface ImapAuth {
   host: string;
@@ -54,8 +69,12 @@ export interface MessageDetail extends MessageSummary {
   messageId: string | null;
   inReplyTo: string | null;
   references: string[];
-  bodyText: string | null;
-  bodyHtml: string | null;
+  /** Readable plain text (see body-text.ts), untruncated. */
+  text: string;
+  /** Which MIME part the text came from. */
+  textSource: BodySource;
+  /** Raw HTML part, if any. */
+  html: string | null;
   attachments: Array<{
     filename: string | null;
     contentType: string;
@@ -206,6 +225,7 @@ export class ImapClient {
         throw new Error(`Message UID ${uid} not found in ${mailbox}`);
       }
       const parsed: ParsedMail = await simpleParser(msg.source as Buffer);
+      const body = readableBody(parsed);
       return {
         uid: msg.uid as number,
         seq: msg.seq as number,
@@ -221,7 +241,7 @@ export class ImapClient {
           ? parsed.cc.map((a) => a.text).join(", ")
           : parsed.cc?.text ?? null,
         size: (msg.size as number | undefined) ?? null,
-        preview: parsed.text ? parsed.text.slice(0, 200) : null,
+        preview: previewOf(stripLinks(body.text)),
         messageId: parsed.messageId ?? null,
         inReplyTo: parsed.inReplyTo ?? null,
         references: Array.isArray(parsed.references)
@@ -229,8 +249,9 @@ export class ImapClient {
           : parsed.references
             ? [parsed.references]
             : [],
-        bodyText: parsed.text ?? null,
-        bodyHtml: typeof parsed.html === "string" ? parsed.html : null,
+        text: body.text,
+        textSource: body.source,
+        html: typeof parsed.html === "string" ? parsed.html : null,
         attachments: (parsed.attachments ?? []).map((a) => ({
           filename: a.filename ?? null,
           contentType: a.contentType,
@@ -448,16 +469,81 @@ export class ImapClient {
     range: string,
     byUid: boolean
   ): Promise<MessageSummary[]> {
-    const out: MessageSummary[] = [];
+    const fetched: FetchMessageObject[] = [];
     const fetchOpts = {
       envelope: true,
       flags: true,
       internalDate: true,
       size: true,
-      bodyParts: ["1"],
+      bodyStructure: true,
     };
     for await (const msg of client.fetch(range, fetchOpts, { uid: byUid })) {
-      out.push(summarize(msg));
+      fetched.push(msg);
+    }
+    const previews = await this.previewsFor(client, fetched);
+    return fetched.map((msg) => ({ ...summarize(msg), preview: previews.get(msg.uid) ?? null }));
+  }
+
+  /**
+   * Previews from each message's own text part. Commands can't be issued
+   * while a FETCH is streaming, so this runs after the envelope fetch and
+   * batches by part number: one FETCH for all messages whose text/plain
+   * is part "1", one for part "1.1", and so on — a few round trips per
+   * listing instead of one per message. Only the first few KB of each part
+   * are fetched (BODY.PEEK, so nothing is marked read) and decoded here.
+   * text/html is used when the plain part is missing or full of HTML
+   * leftovers.
+   */
+  private async previewsFor(
+    client: ImapFlow,
+    messages: FetchMessageObject[]
+  ): Promise<Map<number, string | null>> {
+    const out = new Map<number, string | null>();
+    const parts = new Map(messages.map((m) => [m.uid, textPartNodes(m.bodyStructure)]));
+    try {
+      const plain = await this.fetchParts(client, messages, (uid) => parts.get(uid)?.plain, PREVIEW_PLAIN_BYTES);
+      const needHtml: FetchMessageObject[] = [];
+      for (const m of messages) {
+        const text = plain.get(m.uid);
+        if (text !== undefined && text.trim() && !looksLikeHtmlJunk(text)) {
+          out.set(m.uid, previewOf(stripLinks(text)));
+        } else if (parts.get(m.uid)?.html) {
+          needHtml.push(m);
+        } else if (text !== undefined) {
+          out.set(m.uid, previewOf(stripLinks(cleanJunkPlain(text))));
+        }
+      }
+      const html = await this.fetchParts(client, needHtml, (uid) => parts.get(uid)?.html, PREVIEW_HTML_BYTES);
+      for (const [uid, h] of html) out.set(uid, previewOf(stripLinks(htmlToPlain(h))));
+    } catch {
+      // Previews are best effort; the listing itself must not fail.
+    }
+    return out;
+  }
+
+  private async fetchParts(
+    client: ImapFlow,
+    messages: FetchMessageObject[],
+    pick: (uid: number) => PartInfo | undefined,
+    maxBytes: number
+  ): Promise<Map<number, string>> {
+    const groups = new Map<string, { info: Map<number, PartInfo>; uids: number[] }>();
+    for (const m of messages) {
+      const info = pick(m.uid);
+      if (!info) continue;
+      const g = groups.get(info.part) ?? { info: new Map<number, PartInfo>(), uids: [] as number[] };
+      g.info.set(m.uid, info);
+      g.uids.push(m.uid);
+      groups.set(info.part, g);
+    }
+    const out = new Map<number, string>();
+    for (const [part, g] of groups) {
+      const query = { bodyParts: [{ key: part, start: 0, maxLength: maxBytes }] };
+      for await (const msg of client.fetch(g.uids.join(","), query, { uid: true })) {
+        const raw = partBuffer(msg.bodyParts, part);
+        const info = g.info.get(msg.uid);
+        if (raw && info) out.set(msg.uid, decodePart(raw, info));
+      }
     }
     return out;
   }
@@ -486,16 +572,6 @@ function addrText(
 
 function summarize(msg: FetchMessageObject): MessageSummary {
   const env = msg.envelope;
-  // Try to grab a short text preview from bodyParts if present.
-  let preview: string | null = null;
-  const bodyParts = msg.bodyParts;
-  if (bodyParts && bodyParts.size > 0) {
-    const part = bodyParts.values().next().value;
-    if (part) {
-      const text = Buffer.isBuffer(part) ? part.toString("utf8") : String(part);
-      preview = text.replace(/\s+/g, " ").slice(0, 200);
-    }
-  }
   return {
     uid: msg.uid as number,
     seq: msg.seq as number,
@@ -506,12 +582,87 @@ function summarize(msg: FetchMessageObject): MessageSummary {
     to: addrText(env?.to),
     cc: addrText(env?.cc),
     size: (msg.size as number | undefined) ?? null,
-    preview,
+    preview: null,
   };
+}
+
+type StructureNode = NonNullable<FetchMessageObject["bodyStructure"]>;
+
+export interface PartInfo {
+  part: string;
+  encoding: string;
+  charset: string;
+}
+
+/** Part numbers of the first inline text/plain and text/html parts. */
+export function textParts(root: StructureNode | undefined): { plain?: string; html?: string } {
+  const n = textPartNodes(root);
+  const out: { plain?: string; html?: string } = {};
+  if (n.plain) out.plain = n.plain.part;
+  if (n.html) out.html = n.html.part;
+  return out;
+}
+
+/**
+ * First inline text/plain and text/html parts with their transfer encoding
+ * and charset, skipping attachments and attached messages. A single-part
+ * message is part "1".
+ */
+export function textPartNodes(root: StructureNode | undefined): { plain?: PartInfo; html?: PartInfo } {
+  const found: { plain?: PartInfo; html?: PartInfo } = {};
+  const visit = (node: StructureNode, inMessage: boolean): void => {
+    const type = (node.type || "").toLowerCase();
+    if (node.childNodes && node.childNodes.length) {
+      if (type === "message/rfc822") return;
+      for (const child of node.childNodes) visit(child, inMessage);
+      return;
+    }
+    if (inMessage || (node.disposition || "").toLowerCase() === "attachment") return;
+    const info: PartInfo = {
+      part: node.part || "1",
+      encoding: (node.encoding || "7bit").toLowerCase(),
+      charset: (node.parameters?.charset || "utf-8").toLowerCase(),
+    };
+    if (type === "text/plain" && !found.plain) found.plain = info;
+    if (type === "text/html" && !found.html) found.html = info;
+  };
+  if (root) visit(root, false);
+  return found;
 }
 
 function assertUid(uid: number): void {
   if (!Number.isSafeInteger(uid) || uid <= 0) {
     throw new Error("uid must be a positive integer");
+  }
+}
+
+/** imapflow keys partial parts like "1]<0>"; find the buffer for `part`. */
+function partBuffer(parts: Map<string, Buffer> | undefined, part: string): Buffer | undefined {
+  if (!parts) return undefined;
+  const want = part.toLowerCase();
+  for (const [key, value] of parts) {
+    if (key.toLowerCase().replace(/\].*$/, "") === want) return value;
+  }
+  return undefined;
+}
+
+/**
+ * Decode a (possibly truncated) raw MIME part: transfer encoding, then
+ * charset. Incomplete trailing sequences from the byte cap are dropped.
+ */
+export function decodePart(raw: Buffer, info: Pick<PartInfo, "encoding" | "charset">): string {
+  let bytes: Buffer;
+  if (info.encoding === "base64") {
+    const b64 = raw.toString("latin1").replace(/[^A-Za-z0-9+/]/g, "");
+    bytes = Buffer.from(b64.slice(0, b64.length - (b64.length % 4)), "base64");
+  } else if (info.encoding === "quoted-printable") {
+    bytes = libqp.decode(raw.toString("latin1").replace(/=[0-9A-F]?$/i, ""));
+  } else {
+    bytes = raw;
+  }
+  try {
+    return new TextDecoder(info.charset || "utf-8").decode(bytes);
+  } catch {
+    return bytes.toString("utf8");
   }
 }

@@ -2,6 +2,17 @@
 
 All notable changes are documented here. This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.5.0]
+
+### Changed
+- `get_message` returns clean plain text by default instead of `bodyText` + full `bodyHtml`. text/plain is used when it is real text; otherwise (missing, or MSO/table leftovers) the HTML part is converted with html-to-text. Images, styles and hidden preheaders are dropped.
+- Links are numbered references in the text with URLs in `body.links` (only those on the current page, deduplicated); `include_links: false` omits them.
+- Bodies are paged: `offset`, `max_length` (default 15 000, counting text and link URLs), `truncated`, `total_length`, `next_offset`. Raw HTML only with `include_html: true`, paged by `html_offset`.
+- `list_messages` / `search_messages` previews are built from each message's decoded text part, fetched in batches per MIME part number (a few FETCH round trips per listing instead of one per message), and cleaned the same way.
+- Tool output is compact JSON.
+
+On a real ParentSquare newsletter: ~137 000 characters before, two pages of ~10 500 and ~15 400 characters now (whole text 10 900 characters + 28 links). `list_messages(25)` on iCloud: ~3 s.
+
 ## [0.4.0]
 
 ### Added

@@ -13,7 +13,7 @@ import { AccountsStore } from "./accounts.js";
 import { ClientPool } from "./client-pool.js";
 import { registerMailTools } from "./tools-mail.js";
 
-export const VERSION = "0.4.0";
+export const VERSION = "0.5.0";
 
 export type Logger = (
   level: "debug" | "info" | "warn" | "error",

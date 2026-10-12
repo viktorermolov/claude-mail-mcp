@@ -1,6 +1,6 @@
 {
   "name": "claude-mail-mcp",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Self-hosted IMAP-only MCP connector for Claude: read, search, drafts, move, flags, trash — no sending, no expunge. Auth via Cloudflare Access Managed OAuth.",
   "license": "MIT",
   "author": "Markus Stöger <hi@markusstoeger.com> (https://markusstoeger.com)",
@@ -49,14 +49,18 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.6.1",
     "express": "^5.0.1",
+    "html-to-text": "^10.0.1",
     "imapflow": "^1.0.180",
     "jose": "^6.2.12",
+    "libqp": "^2.1.2",
     "mailparser": "^3.7.2",
     "nodemailer": "^10.1.0",
     "zod": "^3.23.8"
   },
   "devDependencies": {
     "@types/express": "^5.0.0",
+    "@types/html-to-text": "^9.0.4",
+    "@types/libqp": "^1.1.3",
     "@types/mailparser": "^3.4.5",
     "@types/node": "^22.10.0",
     "@types/nodemailer": "^8.0.2",

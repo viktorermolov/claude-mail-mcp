@@ -370,3 +370,37 @@ test("update_draft: missing draft or no UIDPLUS → nothing changes", async () =
   await assert.rejects(b.imap.replaceDraft("Drafts", 139, Buffer.from("x")), /UIDPLUS/);
   assert.deepEqual(b.calls, []);
 });
+
+test("get_message pages link-heavy bodies within max_length, text + links", async () => {
+  const long = (i: number) => `https://email-link.example.com/ls/click?upn=${i}-` + "q".repeat(450);
+  const paras = Array.from({ length: 100 }, (_, i) => `Paragraph ${i} says something useful about school. Click here <${long(i)}> to read.`);
+  const fakeImap = {
+    getMessage: async () => ({
+      uid: 1, seq: 1, flags: [], date: null, subject: "s", from: null, to: null, cc: null, size: 1, preview: null,
+      messageId: null, inReplyTo: null, references: [], attachments: [],
+      text: paras.join("\n\n"), textSource: "html", html: "<p>x</p>",
+    }),
+  };
+  const fakePool = { for: () => ({ imap: fakeImap }) } as unknown as ClientPool;
+  const mcp = buildMcpServer(fakePool, store);
+  const [a, b] = InMemoryTransport.createLinkedPair();
+  await mcp.connect(a);
+  const client = new Client({ name: "t", version: "0" });
+  await client.connect(b);
+  let offset = 0;
+  let rebuilt = "";
+  for (let page = 0; page < 50; page++) {
+    const r = await client.callTool({ name: "get_message", arguments: { mailbox: "INBOX", uid: 1, offset, max_length: 6000 } });
+    const body = JSON.parse((r.content as { text: string }[])[0].text).body;
+    const linkChars = Object.values(body.links as Record<string, string>).reduce((n: number, u) => n + u.length + 8, 0);
+    assert.ok(body.text.length + linkChars <= 6000 || body.text.length <= 2000, `page ${page} too big`);
+    for (const m of body.text.matchAll(/\[(\d+)\]/g)) assert.ok(body.links[m[1]], `link ${m[1]} unresolved`);
+    rebuilt += body.text;
+    if (!body.truncated) break;
+    offset = body.next_offset;
+  }
+  assert.equal(rebuilt.replace(/ \[\d+\]/g, ""), paras.map((p) => p.replace(/ <[^>]+>/, "")).join("\n\n"));
+  const noLinks = await client.callTool({ name: "get_message", arguments: { mailbox: "INBOX", uid: 1, include_links: false } });
+  assert.equal(JSON.parse((noLinks.content as { text: string }[])[0].text).body.links, undefined);
+  await client.close();
+});
