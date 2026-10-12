@@ -2,6 +2,48 @@
 
 All notable changes are documented here. This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.6.0] — reliability and security audit fixes
+
+### Reliability
+- A failed IMAP connect is no longer cached forever: the next call reconnects after a short back-off (2 s doubling to 60 s), and failures are logged with an error code.
+- Every IMAP operation has a 60 s deadline (socket timeout 60 s, lock wait 30 s), including the wait for a connection: on expiry the operation is cancelled (a call still waiting to connect never starts; writes check the deadline before their first change) and the connection is dropped, so queued calls fail fast instead of hanging for minutes. The error says whether anything could have changed.
+- A failed IMAP SEARCH is an error, never an empty result; a message with an unparseable Date header no longer breaks list/search.
+- Text processing is linear-time on hostile input (spaces, NBSP, `![`, U+2028 runs). HTML with more than 30 000 tags (5 000 for list previews) is stripped by a linear scanner instead of being parsed, so deeply nested or unclosed tags can neither stall the server for minutes nor exhaust its memory; inputs are capped at 2 M characters and a capped body is reported as `partial`.
+- Messages over 8 MB are read part by part (text parts capped at 2 MB) instead of loading the whole source.
+- Graceful shutdown: new requests get 503, running requests and IMAP operations (also ones whose client already disconnected) get up to 65 s, the operation deadline plus 5 s, to finish (compose `stop_grace_period: 75s`); a listen failure exits non-zero with a logged error code.
+- An invalid `accounts.json` at startup no longer crash-loops the container: the server starts, logs the reason and reports it from the tools until the file is fixed.
+- Pool resets during in-flight calls no longer leave orphaned IMAP sessions.
+- The \Deleted STORE result is checked and the original's removal verified, so a move is never reported as done when it wasn't. Flag changes and moves first check that the UID exists (servers answer OK for a missing UID); with IMAP MOVE, success requires the message to be gone from the source.
+- `create_draft` selects Drafts read-write before APPEND, so `\Draft` and `\Seen` are no longer dropped after a read (imapflow filters APPEND flags by the selected folder's PERMANENTFLAGS), which made `update_draft` refuse such drafts.
+
+### Safety
+- `update_draft` moves the previous version to Trash (COPY + COPYUID + UID EXPUNGE) instead of expunging it in place: every edit is recoverable, attachments of the old version included.
+- Folder names are resolved against the server's LIST exactly (INBOX in any case); case/variant names can no longer slip past the "nothing leaves Trash" and same-folder guards.
+- Writes check the request's abort signal and the operation deadline before the first mutating command; each write logs one structured line (tool, folder, UID, outcome).
+- `update_draft` refuses, before saving anything, when Drafts and Trash are the same folder.
+
+### Security
+- Access JWT: `exp` is now required; the team's keys are cached 1 h (a key the next fetch no longer lists stops working) and, if refetching fails, the last fetched set stands in for up to 24 h after its fetch; a key outage answers 503 instead of 401, also for a token signed by a key not cached yet. Rejections log the compose-network peer.
+- The request body is parsed only after the JWT check (1 MB, no gzip); errors are JSON-RPC shaped without stack traces.
+- Drafts are plain text only (HTML drafts could make a client fetch attacker URLs); recipients must be bare addresses and header fields can't contain line breaks; display names in tool output are RFC 5322-quoted.
+- Server instructions and read-tool descriptions mark message content as untrusted; `update_draft` and `move_message` are annotated destructive.
+- Search dates must be real calendar dates.
+
+### Links (get_message)
+- `body.links` is returned only with `include_links: true`; references `[n]` stay in the text.
+- Bare URLs of 100+ characters (tracking and image links) become references too; numbering follows reading order; a mail's own "[1]" is shown as "(1)", while `[n]` inside URLs and code (`items[0]`) is left alone; a closing `)` that belongs to the URL is kept.
+- When a link's visible text is an address on another host than its target (the phishing pattern), the reference shows the real host: `[3 → other.example]`.
+- With `include_links`, each URL is cut at 2 KB and links that don't fit `max_length` are left out and counted in `links_omitted`.
+- Unicode layout spaces and blank letters collapse like spaces; tabs (tab-separated tables) and, for plain-text mail, indentation are kept; paging never splits an emoji or a reference.
+- Hidden-element stripping no longer removes `mso-hide:all` blocks (they often hold the real buttons). For a text/plain part full of HTML leftovers, `<https://…>` links, `<name@host>` addresses and line breaks survive the cleanup.
+
+### Repository and CI
+- New SECURITY.md for this fork (private vulnerability reporting); package metadata points at the fork.
+- CI on Node 24, weekly schedule, actions pinned by SHA; the Docker job starts the built image and checks `/health` and an unauthenticated `/mcp`.
+- Dependabot for npm, Docker, compose and Actions with a 7-day cooldown; base images and cloudflared pinned by digest.
+- DEPLOYMENT.md: working step order, reviewed-commit updates with a rollback image, host trust note.
+- Protocol-level tests against a fake IMAP server pin the removal rules, read-only reads and connection recovery; test fixtures use synthetic data.
+
 ## [0.5.0]
 
 ### Changed
@@ -11,7 +53,7 @@ All notable changes are documented here. This project follows [Semantic Versioni
 - `list_messages` / `search_messages` previews are built from each message's decoded text part, fetched in batches per MIME part number (a few FETCH round trips per listing instead of one per message), and cleaned the same way.
 - Tool output is compact JSON.
 
-On a real ParentSquare newsletter: ~137 000 characters before, two pages of ~10 500 and ~15 400 characters now (whole text 10 900 characters + 28 links). `list_messages(25)` on iCloud: ~3 s.
+On a large real-world HTML newsletter: ~137 000 characters before, two pages of ~10 500 and ~15 400 characters now (whole text 10 900 characters + 28 links). `list_messages(25)` on iCloud: ~3 s.
 
 ## [0.4.0]
 

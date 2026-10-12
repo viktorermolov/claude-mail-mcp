@@ -38,28 +38,30 @@ function list(name: string): string[] {
     .filter(Boolean);
 }
 
-export const config = {
-  port: int("PORT", 3220),
-  /**
-   * Interface to bind. Keep the default 127.0.0.1: the only way in is the
-   * local cloudflared connector.
-   */
-  host: optional("HOST", "127.0.0.1"),
-  logLevel: optional("LOG_LEVEL", "info") as
-    | "debug"
-    | "info"
-    | "warn"
-    | "error",
+export function loadConfig() {
+  return {
+    port: int("PORT", 3220),
+    /**
+     * Interface to bind. Default 127.0.0.1; the container sets 0.0.0.0 so
+     * cloudflared can reach it over the private compose network.
+     */
+    host: optional("HOST", "127.0.0.1"),
+    logLevel: optional("LOG_LEVEL", "info") as
+      | "debug"
+      | "info"
+      | "warn"
+      | "error",
 
-  /** Path to the accounts file (chmod 600, owned by the service user). */
-  accountsFile: required("ACCOUNTS_FILE"),
+    /** Path to the accounts file (chmod 600, owned by the service user). */
+    accountsFile: required("ACCOUNTS_FILE"),
 
-  /** Cloudflare Zero Trust team domain, e.g. "myteam.cloudflareaccess.com". */
-  accessTeamDomain: required("CF_ACCESS_TEAM_DOMAIN"),
-  /** Application Audience (AUD) tag of the Access application. */
-  accessAudience: required("CF_ACCESS_AUD"),
-  /** Comma-separated e-mail addresses allowed to use the connector. */
-  allowedEmails: list("ALLOWED_EMAILS"),
-} as const;
+    /** Cloudflare Zero Trust team domain, e.g. "myteam.cloudflareaccess.com". */
+    accessTeamDomain: required("CF_ACCESS_TEAM_DOMAIN"),
+    /** Application Audience (AUD) tag of the Access application. */
+    accessAudience: required("CF_ACCESS_AUD"),
+    /** Comma-separated e-mail addresses allowed to use the connector. */
+    allowedEmails: list("ALLOWED_EMAILS"),
+  } as const;
+}
 
-export type Config = typeof config;
+export type Config = ReturnType<typeof loadConfig>;

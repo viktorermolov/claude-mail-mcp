@@ -2,36 +2,47 @@
 /**
  * claude-mail-mcp — entry point.
  *
- * Boots an Express server on loopback that exposes:
+ * Boots an Express server that exposes:
  *   - GET  /health        liveness probe (no data)
  *   - POST /mcp           MCP Streamable HTTP transport, gated by a
  *                         Cloudflare Access JWT (see access-auth.ts)
+ *
+ * In the container it binds 0.0.0.0 on a private compose network that only
+ * cloudflared shares; outside a container the default is 127.0.0.1.
  *
  * Credentials live in accounts.json, watched via fs.watch for hot reload.
  * Logs never include credentials, message content or tool arguments.
  */
 
-import { config } from "./config.js";
+import type { Server } from "node:http";
+import { loadConfig } from "./config.js";
 import { AccountsStore } from "./accounts.js";
 import { ClientPool } from "./client-pool.js";
 import { accessAuth } from "./access-auth.js";
-import { createApp, Logger, VERSION } from "./app.js";
+import { IMAP_TIMEOUTS, runningImapOperations } from "./imap-client.js";
+import { createApp, Logger, VERSION, type AppState } from "./app.js";
+
+const LEVELS = { debug: 0, info: 1, warn: 2, error: 3 } as const;
+let minLevel: keyof typeof LEVELS = "info";
 
 const log: Logger = (level, message, extra) => {
-  const order = { debug: 0, info: 1, warn: 2, error: 3 };
-  if (order[level] < order[config.logLevel]) return;
-  const line = {
-    ts: new Date().toISOString(),
-    level,
-    msg: message,
-    ...extra,
-  };
-  console.error(JSON.stringify(line));
+  if (LEVELS[level] < LEVELS[minLevel]) return;
+  console.error(JSON.stringify({ ts: new Date().toISOString(), level, msg: message, ...extra }));
 };
 
+/**
+ * Long enough for an IMAP operation to reach its own deadline, so a move
+ * or draft update is never cut off by shutdown; must stay below Docker's
+ * stop timeout (compose sets stop_grace_period: 75s).
+ */
+const DRAIN_MS = IMAP_TIMEOUTS.operationMs + 5_000;
+
 async function main(): Promise<void> {
+  const config = loadConfig();
+  minLevel = config.logLevel;
+
   const store = new AccountsStore(config.accountsFile);
-  const pool = new ClientPool(store);
+  const pool = new ClientPool(store, log);
   await store.start((next, prev) => {
     log("info", "accounts.json changed", {
       previous: prev.map((a) => a.id),
@@ -43,19 +54,28 @@ async function main(): Promise<void> {
       })
     );
   });
-  log("info", "accounts loaded", { count: store.list().length, ids: store.ids() });
+  log("info", "accounts loaded", { count: store.list().length, ids: store.ids(), error: store.error() ?? undefined });
 
   const auth = accessAuth({
     teamDomain: config.accessTeamDomain,
     audience: config.accessAudience,
     allowedEmails: config.allowedEmails,
     onReject: (reason, req) =>
-      log("warn", "rejected MCP request", { reason, method: req.method, path: req.path }),
+      log("warn", "rejected MCP request", {
+        reason,
+        method: req.method,
+        path: req.path,
+        // Compose-network peer (cloudflared or the host), not an end-user IP.
+        peer: req.socket.remoteAddress ?? null,
+      }),
   });
+  void auth.prefetch();
 
-  const app = createApp({ pool, store, auth, log });
+  const state: AppState = { shuttingDown: false, inflight: 0 };
+  const app = createApp({ pool, store, auth, log, state });
 
-  app.listen(config.port, config.host, () => {
+  const server: Server = app.listen(config.port, config.host);
+  server.on("listening", () => {
     log("info", "claude-mail-mcp listening", {
       host: config.host,
       port: config.port,
@@ -63,9 +83,30 @@ async function main(): Promise<void> {
       accounts: store.ids(),
     });
   });
+  server.on("error", (err: NodeJS.ErrnoException) => {
+    log("error", "listen failed", { code: err.code ?? "unknown", host: config.host, port: config.port });
+    process.exit(1);
+  });
 
+  let stopping = false;
   const shutdown = async (signal: string): Promise<void> => {
-    log("info", "shutting down", { signal });
+    if (stopping) return;
+    stopping = true;
+    state.shuttingDown = true;
+    log("info", "shutting down", { signal, inflight: state.inflight, imap_running: runningImapOperations() });
+    server.close();
+    // Let in-flight requests and IMAP operations finish (including ones
+    // whose HTTP client already left: moves/draft updates must not stop
+    // half-way), then drop idle keep-alive connections.
+    const busy = (): boolean => state.inflight > 0 || runningImapOperations() > 0;
+    const deadline = Date.now() + DRAIN_MS;
+    while (busy() && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    if (busy()) {
+      log("warn", "shutdown with work still running", { inflight: state.inflight, imap_running: runningImapOperations() });
+    }
+    server.closeAllConnections();
     store.stop();
     await pool.closeAll().catch(() => {});
     process.exit(0);
@@ -75,13 +116,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((err) => {
-  console.error(
-    JSON.stringify({
-      ts: new Date().toISOString(),
-      level: "error",
-      msg: "fatal startup error",
-      error: err instanceof Error ? err.message : String(err),
-    })
-  );
+  log("error", "fatal startup error", { error: err instanceof Error ? err.message : String(err) });
   process.exit(1);
 });

@@ -5,6 +5,13 @@
 #   docker compose up -d --build                 # server only
 #   docker compose --profile tunnel up -d        # + tunnel (after Access is set up)
 
+# Bounded container logs (also the host default on the Pi).
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   mail-mcp:
     build:
@@ -28,6 +35,11 @@ services:
     mem_limit: 384m
     pids_limit: 100
     restart: unless-stopped
+    logging: *logging
+    # Room for in-flight moves/draft updates to finish on shutdown (the
+    # server drains for up to 65 s — the IMAP operation deadline plus 5 s —
+    # before closing IMAP).
+    stop_grace_period: 75s
     networks: [mcp]
     healthcheck:
       test: ["CMD", "/nodejs/bin/node", "-e", "fetch('http://127.0.0.1:3220/health').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
@@ -37,7 +49,7 @@ services:
       start_period: 10s
 
   cloudflared:
-    image: cloudflare/cloudflared:2026.9.1
+    image: cloudflare/cloudflared:2026.9.1@sha256:b269e8abd07a5bf6f3f4be65d5050b2174eca89c56a0241a8ff32a16aec454e4
     profiles: [tunnel]
     command: tunnel --no-autoupdate --config /etc/cloudflared/config.yml run
     volumes:
@@ -47,6 +59,7 @@ services:
     security_opt: ["no-new-privileges:true"]
     mem_limit: 128m
     restart: unless-stopped
+    logging: *logging
     networks: [mcp]
     depends_on:
       mail-mcp:

@@ -1,112 +1,33 @@
-# Security Policy
+# Security policy
 
-## Supported versions
-
-Until v1.0, only the latest minor release is supported with security fixes.
-
-| Version | Supported |
-|---------|-----------|
-| 0.2.x   | yes       |
-| 0.1.x   | no — upgrade to 0.2.1 (see [CHANGELOG.md](CHANGELOG.md)) |
+This is a personal fork of [maxx3250/claude-mail-mcp](https://github.com/maxx3250/claude-mail-mcp), cut down to a read-and-organise IMAP connector. It is not the upstream project — please report issues **here**, not upstream.
 
 ## Reporting a vulnerability
 
-**Please do not open a public GitHub issue for security problems.**
+Use GitHub's private reporting: **Security → Report a vulnerability** on [viktorermolov/claude-mail-mcp](https://github.com/viktorermolov/claude-mail-mcp/security/advisories/new). Please do not open a public issue for security problems.
 
-Preferred channel:
+## Supported versions
 
-1. **GitHub Private Vulnerability Reporting** — open a private advisory at
-   <https://github.com/maxx3250/claude-mail-mcp/security/advisories/new>
+Only the latest release on `main` (currently 0.6.x) is supported.
 
-Alternative channel:
+## What the connector can and cannot do
 
-2. Email **security@markusstoeger.com**. PGP is not required.
+- **No sending.** There is no send tool, no SMTP code and no SMTP credentials. Drafts are composed locally (plain text only) and APPENDed to Drafts; the user sends them from their own mail client.
+- **No permanent deletion.** Nothing sends a plain `EXPUNGE` or `CLOSE`. Without IMAP `MOVE` (iCloud) the only removal is `UID EXPUNGE` of exactly one message, and only after the server confirmed its copy in another folder (`COPYUID`); with `MOVE` the server's atomic command is used. Every write first checks that the message exists. "Delete" moves to Trash; nothing can be removed from Trash; moving out of Trash (restore) is allowed. `update_draft` moves the previous version to Trash. Servers without `UIDPLUS` are refused. This is pinned by protocol-level tests against a fake IMAP server.
+- **Reading never marks mail as read** (EXAMINE + BODY.PEEK only).
+- **No calendar or contacts.**
 
-## What to include
+## Threat model and controls
 
-- A description of the issue and its impact
-- Steps to reproduce (or a proof of concept)
-- The affected version / commit
-- Whether the issue is already public anywhere
+| Adversary | Controls |
+|---|---|
+| Internet | Reachable only through a Cloudflare Tunnel; no published ports. The hostname is a Cloudflare Access application with Managed OAuth (DCR + PKCE) and an allow-list policy. |
+| Requests that bypass Access (another tunnel route, a process on the host) | The origin validates every `Cf-Access-Jwt-Assertion`: RS256 signature against the team's keys, issuer, audience (AUD tag), required and unexpired `exp`, e-mail allow-list. The request body is parsed only after that check, limited to 1 MB, no compression. |
+| Anyone who can send mail to the account | All parsing is bounded: linear-time text processing, input size caps, HTML with more than 30 000 tags stripped linearly instead of parsed (the parser is quadratic in nesting and builds a full DOM), per-operation IMAP deadlines that also cancel the operation. Mail content is declared untrusted to the model (server instructions + read-tool descriptions); destructive tools carry `destructiveHint`. Drafts are text-only, so injected HTML can't make a client fetch remote URLs. |
+| Supply chain | Lockfile + `npm ci --ignore-scripts`; base images pinned by digest; GitHub Actions pinned by SHA; Dependabot with a 7-day cooldown; weekly scheduled CI with `npm audit`. |
+| Local host | The container runs as a dedicated unprivileged user with a read-only root filesystem, no capabilities and `no-new-privileges`; the credentials file is `600` for that user only. **Membership in the host's `docker` group is equivalent to root and therefore to reading the mail credentials** — keep that group to people and services you trust with the mailbox. |
 
-## Response timeline
+## Handling of secrets and data
 
-- **Acknowledgement** within 48 hours
-- **Initial assessment** within 7 days
-- **Fix or status update** within 14 days
-
-If the report is valid, a fix is published as a patch release and a GitHub Security Advisory with a CVE (where applicable) is opened. Reporters are credited unless they request otherwise.
-
-## Threat model
-
-**Assets we protect:**
-- Mailbox credentials (IMAP/SMTP/CalDAV passwords in `accounts.json`)
-- Email content (read access, write access, deletion)
-- Calendar data
-- The Bearer token gating `/mcp`
-- The OAuth signing key
-
-**Adversaries we consider:**
-- Random internet attacker (port scan, brute force)
-- Malicious page loaded in the operator's browser (CSRF against `/settings`)
-- Compromised network path between Claude.ai and the connector (MITM)
-- A compromised Claude.ai client (malicious tool calls)
-- Local-system attacker (other processes on the same host)
-
-**Out of scope:**
-- A root-level compromise of the host. With root, all credentials are recoverable from `/var/lib/mail-mcp/accounts.json` — same security boundary as `~/.ssh/id_rsa` or `/etc/shadow`. We do not attempt at-rest encryption that depends on a key also stored on the same host.
-- Compromise of the upstream mailbox provider.
-- Phishing of the operator's htpasswd login.
-
-## What this project does
-
-### Transport
-- TLS terminated by nginx, certificate from Let's Encrypt (90-day rotation by `certbot.timer`).
-- HSTS, `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, `X-Robots-Tag: noindex` on every response.
-- Backend and OAuth shim bound to `127.0.0.1` only. systemd kernel-level network filter (`IPAddressDeny=any`, `IPAddressAllow=127.0.0.1/32`) on the shim as a backstop.
-
-### Authentication
-- OAuth 2.1 + Dynamic Client Registration (RFC 7591) + PKCE (S256).
-- JWT access tokens (RS256, 1h TTL), refresh tokens (30d, stored as SHA-256 hashes).
-- Human login via htpasswd; brute-force throttled by nginx (`limit_req`, 10 req/min per IP).
-- `/settings` UI gated by HTTP Basic Auth against the same htpasswd file.
-- `/settings` POST endpoints additionally protected by Origin/Referer CSRF guard.
-
-### Process isolation
-- Both processes (backend + shim) run as the dedicated non-root `mailmcp` system user (no shell, no home directory).
-- systemd hardening: `NoNewPrivileges`, `ProtectSystem=strict`, `ProtectHome`, `PrivateTmp`, `PrivateDevices`, `ProtectKernel*`, `ProtectControlGroups`, `ProtectClock`, `ProtectHostname`, `ProtectProc=invisible`, `RestrictNamespaces`, `RestrictRealtime`, `RestrictSUIDSGID`, `LockPersonality`, `SystemCallFilter=@system-service ~@privileged @resources`.
-- Writable filesystem limited to `/var/lib/mail-mcp` (state dir).
-- Memory and task caps via `MemoryMax`, `TasksMax`, `LimitNOFILE`.
-
-### Credentials at rest
-- `accounts.json` and `token` files are owned by `mailmcp:mailmcp` and chmod 600.
-- `.env` is `root:mailmcp` 640 (root can edit, the service can read).
-- htpasswd file is `root:mailmcp` 640 (not world-readable).
-
-### Input validation
-- Every MCP tool input validated with [Zod](https://zod.dev) schemas.
-- `accounts.json` schema-validated on every load (id pattern, port ranges, required fields).
-- `/settings/save` re-validates all fields and rejects bad input with a redirect.
-- Subprocess invocations (`htpasswd -vb`) use `execFile` (no shell) with a regex-gated username (`[a-zA-Z0-9_.-]{1,64}`) and a length-bounded password.
-
-### Output filtering
-- `list_accounts` returns id/label/default/From/imap_host/caldav_enabled — never credentials.
-- `/health` shows the same public summary.
-- Server logs never include passwords or Bearer tokens.
-
-## Hardening checklist for operators
-
-These are not vulnerabilities in this project, but operators should:
-
-- [x] Run behind HTTPS with a valid certificate (the included nginx vhost + certbot does this).
-- [x] Bind the Node processes to `127.0.0.1` and let nginx handle public traffic.
-- [x] Run the systemd units as a dedicated non-root user.
-- [x] Use a host firewall (UFW or equivalent) with default-deny incoming.
-- [ ] Rotate `AUTH_TOKEN` periodically. Restart both services after rotation.
-- [ ] Use app-specific passwords on providers that support them — never your main account password.
-- [ ] Restrict who can reach the connector at the network level (VPN, IP allowlist, or htpasswd in front of the OAuth shim).
-- [ ] Run a fail2ban jail against the shim's auth-fail log lines (`[oauth-shim] login fail` and `[oauth-shim] settings auth fail`) for additional brute-force protection.
-- [ ] Keep `accounts.json` out of any backups that leave the host unencrypted.
-- [ ] Subscribe to GitHub Security Advisories for this repo and the dependencies (`imapflow`, `nodemailer`, `tsdav`, `@modelcontextprotocol/sdk`).
-
-See [docs/HARDENING.md](docs/HARDENING.md) for the full operator checklist and threat-model walkthrough.
+- The IMAP app-specific password lives only in `secrets/accounts.json` on the host (git-ignored). Parse errors name fields, never values.
+- Logs contain no credentials, addresses, subjects or message content: auth rejections log a reason and the compose-network peer; write tools log tool, folder, UID and outcome.
