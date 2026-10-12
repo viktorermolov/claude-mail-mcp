@@ -20,6 +20,8 @@ import { buildDraftSource } from "./draft-composer.js";
 import { windowText, footnoteLinks, linksIn } from "./body-text.js";
 
 const DEFAULT_BODY_CHARS = 15_000;
+/** Never shrink a page below this many text characters to fit its links. */
+const MIN_TEXT_PER_PAGE = 2_000;
 
 function asJson(value: unknown): { content: { type: "text"; text: string }[] } {
   return {
@@ -186,7 +188,7 @@ export function registerMailTools(
           .min(500)
           .max(100_000)
           .optional()
-          .describe(`Max characters of text to return (default ${DEFAULT_BODY_CHARS})`),
+          .describe(`Approximate max characters per page, counting the text and the link URLs it references (default ${DEFAULT_BODY_CHARS})`),
         include_links: z
           .boolean()
           .optional()
@@ -204,7 +206,20 @@ export function registerMailTools(
       const m = await imap.getMessage(mailbox, uid);
       const max = max_length ?? DEFAULT_BODY_CHARS;
       const { text, links } = footnoteLinks(m.text);
-      const body = windowText(text, offset ?? 0, max);
+      const withLinks = include_links !== false;
+      // max_length budgets the page's text plus the URLs it references, so
+      // link-heavy newsletters page instead of ballooning the response.
+      let budget = max;
+      let body = windowText(text, offset ?? 0, budget);
+      let pageLinks = withLinks ? linksIn(body.text, links) : {};
+      for (let i = 0; i < 5; i++) {
+        const linkChars = Object.values(pageLinks).reduce((n, u) => n + u.length + 8, 0);
+        const over = body.text.length + linkChars - max;
+        if (over <= 0 || budget <= MIN_TEXT_PER_PAGE) break;
+        budget = Math.max(MIN_TEXT_PER_PAGE, budget - over);
+        body = windowText(text, offset ?? 0, budget);
+        pageLinks = withLinks ? linksIn(body.text, links) : {};
+      }
       const result: Record<string, unknown> = {
         uid: m.uid,
         mailbox,
@@ -226,7 +241,7 @@ export function registerMailTools(
           total_length: body.total_length,
           truncated: body.truncated,
           next_offset: body.next_offset,
-          ...(include_links === false ? {} : { links: linksIn(body.text, links) }),
+          ...(withLinks ? { links: pageLinks } : {}),
         },
         has_html: m.html !== null,
       };

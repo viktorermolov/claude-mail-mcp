@@ -119,7 +119,10 @@ export function cleanJunkPlain(text: string): string {
 
 /** A one-line preview of at most `max` characters. */
 export function previewOf(text: string, max = 200): string | null {
-  const one = text.replace(/\s+/g, " ").trim();
+  const one = text
+    .replace(/[-=_*~#]{4,}/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
   if (!one) return null;
   return one.length > max ? one.slice(0, max - 1).trimEnd() + "…" : one;
 }
