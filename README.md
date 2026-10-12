@@ -18,9 +18,9 @@ What this fork deliberately **cannot** do:
 |------|---------|---------|
 | `list_accounts` | Configured mailboxes — id, label, address. Never credentials. | no |
 | `list_folders` | IMAP folders with special-use flags | no |
-| `list_messages` | Newest N messages in a folder | no |
-| `search_messages` | Server-side IMAP search (from/to/subject/body/date/flags) | no |
-| `get_message` | Full body + headers + attachment metadata | no |
+| `list_messages` | Newest N messages in a folder, with a clean one-line preview | no |
+| `search_messages` | Server-side IMAP search (from/to/subject/body/date/flags), same previews | no |
+| `get_message` | Headers, attachment metadata and the body as clean, paged plain text | no |
 | `create_draft` | Compose locally and APPEND to Drafts | yes |
 | `update_draft` | Save a new version of a draft, then remove the old one (Drafts only, `\Draft` only) | yes |
 | `mark_read` | Set / clear `\Seen` | yes, reversible |
@@ -28,7 +28,13 @@ What this fork deliberately **cannot** do:
 | `move_message` | Move between folders, including restoring from Trash | yes, reversible |
 | `move_to_trash` | Move to Trash (refused for messages already in Trash) | yes, reversible |
 
-Read tools open the folder with `EXAMINE`, so reading never marks mail as read. Every tool carries MCP annotations (`readOnlyHint` / `destructiveHint`).
+Read tools open the folder with `EXAMINE`, so reading never marks mail as read.
+
+### Compact bodies
+
+`get_message` returns readable plain text, not raw MIME: the text/plain part when it is real text, otherwise the HTML part converted with [html-to-text](https://github.com/html-to-text/node-html-to-text) (no images, styles or hidden preheaders; layout tables flattened). Links become numbered references (`Sign up [3]`) and `body.links` maps the numbers on the current page to URLs — tracking URLs can be hundreds of characters and stay intact. Pages are about `max_length` characters (default 15 000) counting text and link URLs; `truncated`, `total_length` and `next_offset` let the client read on with `offset`. Raw HTML only with `include_html: true` (paged with `html_offset`).
+
+Previews in `list_messages` / `search_messages` come from the first few KB of each message's own text part, fetched in batches by MIME part number (`BODY.PEEK`), decoded locally and cleaned the same way. Every tool carries MCP annotations (`readOnlyHint` / `destructiveHint`).
 
 ## Authentication
 
