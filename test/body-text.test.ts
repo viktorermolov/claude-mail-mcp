@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { looksLikeHtmlJunk, readableBody, previewOf, windowText, htmlToPlain } from "../src/body-text.js";
 import { footnoteLinks, linksIn, stripLinks, cleanJunkPlain } from "../src/body-text.js";
-import { textParts } from "../src/imap-client.js";
+import { textParts, decodePart, ImapClient } from "../src/imap-client.js";
 
 const MSO_PLAIN = `Community Blog\n\n<!--[if gte mso 9]>\n<v:background fill="t"/>\n<![endif]-->\n|<!--[if mso]><td align="center"><![endif]-->\n| Hello&nbsp;&nbsp;families`;
 const NEWSLETTER_HTML = `<html><head><style>.x{color:red}</style></head><body>
@@ -111,4 +111,39 @@ test("textParts picks inline text parts and skips attachments", () => {
   assert.deepEqual(textParts(mixed as never), { plain: "1.1", html: "1.2" });
   assert.deepEqual(textParts({ type: "text/html" } as never), { html: "1" });
   assert.deepEqual(textParts({ type: "multipart/mixed", childNodes: [{ part: "1", type: "text/plain", disposition: "attachment" }] } as never), {});
+});
+
+
+test("decodePart handles truncated base64 / quoted-printable and charsets", () => {
+  const b64 = Buffer.from(Buffer.from("Привет, мир! Hello").toString("base64"));
+  assert.equal(decodePart(b64, { encoding: "base64", charset: "utf-8" }), "Привет, мир! Hello");
+  // cut mid-quantum: incomplete tail is dropped, not garbled
+  assert.match(decodePart(b64.subarray(0, b64.length - 3), { encoding: "base64", charset: "utf-8" }), /^Привет, мир!/);
+  assert.equal(decodePart(Buffer.from("Gr=C3=BC=C3=9Fe=\r\n aus=20Berlin=C"), { encoding: "quoted-printable", charset: "utf-8" }), "Grüße aus Berlin");
+  const cp1251 = Buffer.from([0xcf, 0xf0, 0xe8, 0xe2, 0xe5, 0xf2]);
+  assert.equal(decodePart(cp1251, { encoding: "8bit", charset: "windows-1251" }), "Привет");
+  assert.equal(decodePart(Buffer.from("plain"), { encoding: "7bit", charset: "x-unknown-charset" }), "plain");
+});
+
+test("previews are fetched in batches per part number, not per message", async () => {
+  const imap = new ImapClient({ host: "x", port: 993, user: "u", pass: "p", secure: true });
+  const fetches: string[] = [];
+  const bodies: Record<string, string> = { "1": "Hello from one", "2": "Hello from two", "3": "Hello from three" };
+  const fake = {
+    fetch: async function* (range: string, query: { bodyParts: { key: string }[] }) {
+      fetches.push(`${query.bodyParts[0].key}:${range}`);
+      for (const uid of range.split(",").map(Number)) {
+        yield { uid, bodyParts: new Map([[`${query.bodyParts[0].key}]<0>`, Buffer.from(bodies[uid])]]) };
+      }
+    },
+  };
+  const msgs = [1, 2, 3].map((uid) => ({
+    uid,
+    bodyStructure: uid === 3
+      ? { type: "text/plain", encoding: "7bit" }
+      : { type: "multipart/alternative", childNodes: [{ part: "1", type: "text/plain", encoding: "7bit" }, { part: "2", type: "text/html" }] },
+  }));
+  const previews = await (imap as unknown as { previewsFor: (c: unknown, m: unknown) => Promise<Map<number, string>> }).previewsFor(fake, msgs);
+  assert.deepEqual([...previews.entries()].sort(), [[1, "Hello from one"], [2, "Hello from two"], [3, "Hello from three"]]);
+  assert.deepEqual(fetches, ["1:1,2,3"]);
 });
