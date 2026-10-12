@@ -2,6 +2,11 @@
 
 All notable changes are documented here. This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.6.1]
+
+### Fixed
+- `get_message`: a long bare URL replaced by `[n]` no longer swallows what follows it. Markdown links keep their closing bracket and emphasis (`**[Sign up]([2])**`), and closing quotes, `»`, `}` and Markdown `*`/`_`/`~` after a URL stay in the text; a `)`, `]` or `}` that belongs to the URL itself (balanced) is still kept.
+
 ## [0.6.0] — reliability and security audit fixes
 
 ### Reliability
