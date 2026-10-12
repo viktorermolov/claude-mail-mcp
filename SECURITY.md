@@ -15,7 +15,7 @@ Only the latest release on `main` (currently 0.6.x) is supported.
 - **No sending.** There is no send tool, no SMTP code and no SMTP credentials. Drafts are composed locally (plain text only) and APPENDed to Drafts; the user sends them from their own mail client.
 - **No permanent deletion.** Nothing sends a plain `EXPUNGE` or `CLOSE`. Without IMAP `MOVE` (iCloud) the only removal is `UID EXPUNGE` of exactly one message, and only after the server confirmed its copy in another folder (`COPYUID`); with `MOVE` the server's atomic command is used. Every write first checks that the message exists. "Delete" moves to Trash; nothing can be removed from Trash; moving out of Trash (restore) is allowed. `update_draft` moves the previous version to Trash. Servers without `UIDPLUS` are refused. This is pinned by protocol-level tests against a fake IMAP server.
 - **Reading never marks mail as read** (EXAMINE + BODY.PEEK only).
-- **No calendar or contacts.**
+- **Calendars read-only, no contacts.** The CalDAV client can only send `PROPFIND` and `REPORT` (pinned by a source test); calendar credentials go only to the configured origin or https hosts under its parent domain (iCloud's per-user hosts), checked on every redirect. Responses are size-capped, XML with a DOCTYPE is refused, recurrence expansion is bounded, and a calendar object's own time zone definitions never affect other objects.
 
 ## Threat model and controls
 

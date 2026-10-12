@@ -2,6 +2,12 @@
 
 All notable changes are documented here. This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.7.0]
+
+### Added
+- Read-only calendars over CalDAV: `list_calendars`, `list_events` (date range in a chosen IANA time zone, recurring series expanded with their exceptions, text filter, limit) and `get_event` (full description, organizer, attendees with responses, recurrence rule and exceptions). `CALENDAR_ICLOUD=on` uses each iCloud account's IMAP app-specific password with `https://caldav.icloud.com`; other providers take a `caldav` block in accounts.json. `CALENDAR_TIMEZONE` sets the default zone.
+- The CalDAV client can only send `PROPFIND` and `REPORT`; credentials go only to the configured origin or https hosts under its parent domain (checked on every redirect); responses are capped at 8 MB, XML with a DOCTYPE is refused, recurrence expansion is bounded, and each calendar object's own VTIMEZONE applies only to that object (a hostile invitation can't shift other events). Event text is declared untrusted to the model.
+
 ## [0.6.1]
 
 ### Fixed

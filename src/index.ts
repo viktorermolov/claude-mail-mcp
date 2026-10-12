@@ -42,7 +42,7 @@ async function main(): Promise<void> {
   minLevel = config.logLevel;
 
   const store = new AccountsStore(config.accountsFile);
-  const pool = new ClientPool(store, log);
+  const pool = new ClientPool(store, { log, icloudCalendar: config.calendarIcloud });
   await store.start((next, prev) => {
     log("info", "accounts.json changed", {
       previous: prev.map((a) => a.id),
@@ -72,7 +72,7 @@ async function main(): Promise<void> {
   void auth.prefetch();
 
   const state: AppState = { shuttingDown: false, inflight: 0 };
-  const app = createApp({ pool, store, auth, log, state });
+  const app = createApp({ pool, store, auth, log, state, calendarTimezone: config.calendarTimezone });
 
   const server: Server = app.listen(config.port, config.host);
   server.on("listening", () => {
@@ -81,6 +81,8 @@ async function main(): Promise<void> {
       port: config.port,
       version: VERSION,
       accounts: store.ids(),
+      calendar_icloud: config.calendarIcloud,
+      calendar_timezone: config.calendarTimezone,
     });
   });
   server.on("error", (err: NodeJS.ErrnoException) => {

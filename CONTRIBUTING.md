@@ -1,6 +1,6 @@
 # Contributing
 
-This is a personal fork of [maxx3250/claude-mail-mcp](https://github.com/maxx3250/claude-mail-mcp), cut down to a read-and-organise IMAP connector for iCloud. It deliberately has **no sending, no permanent deletion, no calendar and no contacts** — changes that add any of these won't be accepted. See [SECURITY.md](SECURITY.md) for the exact rules.
+This is a personal fork of [maxx3250/claude-mail-mcp](https://github.com/maxx3250/claude-mail-mcp), cut down to a read-and-organise IMAP connector for iCloud with read-only calendars. It deliberately has **no sending, no permanent deletion, no calendar writes and no contacts** — changes that add any of these won't be accepted. See [SECURITY.md](SECURITY.md) for the exact rules.
 
 ## Before you open a PR
 

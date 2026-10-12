@@ -5,8 +5,13 @@
  * hand. The server reads it on startup and re-reads it whenever the file
  * changes (fs.watch), so credentials can be rotated without a restart.
  *
- * This fork is IMAP-only: there are no SMTP or CalDAV credentials, so the
- * server has no way to send mail even if a tool asked it to.
+ * There are no SMTP credentials, so the server has no way to send mail even
+ * if a tool asked it to. Calendars are read-only over CalDAV; for iCloud
+ * the same app-specific password works, so an optional "caldav" block only
+ * needs a URL (user/pass default to the IMAP ones):
+ *   "caldav": { "url": "https://caldav.icloud.com" }
+ * The CALENDAR_ICLOUD=on environment setting enables exactly that for
+ * accounts on imap.mail.me.com without editing this file.
  *
  * File format (version 1):
  *   {
@@ -49,12 +54,20 @@ export interface MailDefaults {
   trashFolder?: string;
 }
 
+export interface CalDavCreds {
+  url: string;
+  user: string;
+  pass: string;
+}
+
 export interface Account {
   id: string;
   label: string;
   default?: boolean;
   imap: ImapCreds;
   mail: MailDefaults;
+  /** Read-only calendar access, when configured. */
+  caldav?: CalDavCreds;
 }
 
 export interface AccountsFile {
@@ -290,12 +303,36 @@ function parseAccount(raw: unknown, index: number): Account {
       `accounts[${index}].id must match ${ID_PATTERN} (a-z, 0-9, _, -; 1-32 chars; start alphanumeric)`
     );
   }
+  const imap = parseImap(a.imap, `accounts[${index}].imap`);
   return {
     id,
     label: expectStr(a.label, `accounts[${index}].label`),
     default: a.default === true ? true : undefined,
-    imap: parseImap(a.imap, `accounts[${index}].imap`),
+    imap,
     mail: parseMail(a.mail, `accounts[${index}].mail`),
+    caldav: a.caldav === undefined ? undefined : parseCalDav(a.caldav, imap, `accounts[${index}].caldav`),
+  };
+}
+
+function parseCalDav(raw: unknown, imap: ImapCreds, where: string): CalDavCreds {
+  if (!raw || typeof raw !== "object") {
+    throw new AccountsStoreError(`${where} must be an object`);
+  }
+  const o = raw as Record<string, unknown>;
+  const url = expectStr(o.url, `${where}.url`);
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new AccountsStoreError(`${where}.url must be a URL`);
+  }
+  if (parsed.protocol !== "https:" && !["127.0.0.1", "localhost", "[::1]"].includes(parsed.hostname)) {
+    throw new AccountsStoreError(`${where}.url must use https`);
+  }
+  return {
+    url,
+    user: o.user === undefined ? imap.user : expectStr(o.user, `${where}.user`),
+    pass: o.pass === undefined ? imap.pass : expectStr(o.pass, `${where}.pass`),
   };
 }
 
