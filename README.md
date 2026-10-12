@@ -5,7 +5,7 @@ Self-hosted **IMAP connector for Claude**: a Streamable HTTP MCP server that let
 What this fork deliberately **cannot** do:
 
 - **Send mail.** There is no send tool and no SMTP code or SMTP credentials. Replies are written as drafts; you send them from your own mail client.
-- **Move or delete.** Nothing moves, copies, sets `\Deleted` or issues `EXPUNGE`. iCloud has no IMAP `MOVE`, and a COPY + EXPUNGE fallback was deliberately left out.
+- **Permanently delete.** "Delete" moves a message to Trash; nothing can remove a message from Trash, and a plain `EXPUNGE` is never sent. The single removal path is `UID EXPUNGE` of one message, used only (a) after a move's copy has been confirmed by the server (`COPYUID`) — iCloud has no IMAP `MOVE`, so this is the RFC 6851 §3.3 equivalent — and (b) for the superseded version of a draft inside Drafts after the new version's UID is confirmed. Servers without `UIDPLUS` are refused.
 - **Touch calendars or contacts.** CalDAV support is removed.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE) [![Node](https://img.shields.io/badge/node-%3E=20-brightgreen.svg)](https://nodejs.org)
@@ -22,8 +22,11 @@ What this fork deliberately **cannot** do:
 | `search_messages` | Server-side IMAP search (from/to/subject/body/date/flags) | no |
 | `get_message` | Full body + headers + attachment metadata | no |
 | `create_draft` | Compose locally and APPEND to Drafts | yes |
+| `update_draft` | Save a new version of a draft, then remove the old one (Drafts only, `\Draft` only) | yes |
 | `mark_read` | Set / clear `\Seen` | yes, reversible |
 | `set_flagged` | Set / clear `\Flagged` | yes, reversible |
+| `move_message` | Move between folders, including restoring from Trash | yes, reversible |
+| `move_to_trash` | Move to Trash (refused for messages already in Trash) | yes, reversible |
 
 Read tools open the folder with `EXAMINE`, so reading never marks mail as read. Every tool carries MCP annotations (`readOnlyHint` / `destructiveHint`).
 
@@ -44,7 +47,7 @@ Deployment with Docker Compose and a locally-managed tunnel: [docs/DEPLOYMENT.md
 
 ```bash
 npm ci
-npm test        # tool list, auth, no-send / no-move / no-expunge guarantees
+npm test        # tool list, auth, no-send guarantees, move/trash/draft safety on a fake server
 npm run build
 ```
 
@@ -52,7 +55,7 @@ npm run build
 
 - IMAP: `imap.mail.me.com:993`, TLS. User: your Apple ID e-mail (or the @icloud.com address).
 - Password: an app-specific password from <https://account.apple.com> → Sign-In and Security → App-Specific Passwords.
-- Drafts is `Drafts`. iCloud IMAP advertises `UIDPLUS` but not `MOVE`.
+- Drafts is `Drafts`, Trash is `Deleted Messages`. iCloud IMAP advertises `UIDPLUS` but not `MOVE` (or `REPLACE`), so moves and draft updates use the guarded `UID COPY`/`APPEND` + `UID EXPUNGE` path.
 
 ## License
 

@@ -6,9 +6,11 @@
  * collide on the IMAP `SELECT` state.
  *
  * Read paths open the mailbox with EXAMINE (read-only), so listing or
- * reading never changes flags. Write paths are limited to flag changes
- * and APPEND (drafts) — nothing in this file moves, sets \Deleted or
- * EXPUNGEs.
+ * reading never changes flags. Write paths are flag changes (\Seen,
+ * \Flagged), APPEND (drafts) and moves. The only removal is expungeOne():
+ * "UID EXPUNGE" of a single message after its copy (or its replacing
+ * draft) has been confirmed. There is no plain EXPUNGE and no way to
+ * remove a message from Trash.
  *
  * Tool handlers stay thin: they call high-level methods here, get back
  * plain JSON-shaped objects, and don't see imapflow internals.
@@ -278,14 +280,167 @@ export class ImapClient {
 
   /**
    * Append a raw RFC 822 message to a folder — used for drafts only.
+   * Returns the new message's UID when the server reports it (APPENDUID).
    */
   async append(
     mailbox: string,
     raw: string | Buffer,
     flags: string[]
-  ): Promise<void> {
+  ): Promise<number | undefined> {
     const client = await this.ensureConnected();
-    await client.append(mailbox, raw, flags);
+    const res = await client.append(mailbox, raw, flags);
+    return res && typeof res.uid === "number" ? res.uid : undefined;
+  }
+
+  /**
+   * Move one message to another folder.
+   *
+   * With IMAP MOVE (RFC 6851) this is one atomic command. iCloud has no
+   * MOVE, so otherwise we run the sequence RFC 6851 §3.3 defines MOVE to be
+   * equivalent to — UID COPY, then \Deleted + UID EXPUNGE on the original —
+   * with these guards:
+   *   - UIDPLUS is required (otherwise refuse before touching anything);
+   *   - the original is touched only after the server confirms the copy
+   *     with a COPYUID response naming the new UID;
+   *   - the expunge is "UID EXPUNGE <that uid>" via expungeOne().
+   * Moving out of Trash (restoring) is allowed; see moveToTrash() for the
+   * rule that nothing is ever removed from Trash itself.
+   */
+  async moveMessage(
+    sourceMailbox: string,
+    uid: number,
+    destinationMailbox: string
+  ): Promise<{ newUid?: number }> {
+    assertUid(uid);
+    if (sourceMailbox === destinationMailbox) {
+      throw new Error("Source and destination mailbox are the same.");
+    }
+    const client = await this.ensureConnected();
+    const hasMove = client.capabilities.has("MOVE");
+    if (!hasMove && !client.capabilities.has("UIDPLUS")) {
+      throw new Error(
+        "IMAP server supports neither MOVE nor UIDPLUS; refusing to move."
+      );
+    }
+    const lock = await client.getMailboxLock(sourceMailbox);
+    try {
+      if (hasMove) {
+        const res = await client.messageMove(`${uid}`, destinationMailbox, {
+          uid: true,
+        });
+        if (!res) {
+          throw new Error(`Message UID ${uid} not found in ${sourceMailbox}`);
+        }
+        return { newUid: res.uidMap?.get(uid) };
+      }
+
+      const copy = await client.messageCopy(`${uid}`, destinationMailbox, {
+        uid: true,
+      });
+      const newUid = copy && copy.uidMap ? copy.uidMap.get(uid) : undefined;
+      if (!newUid) {
+        throw new Error(
+          `Copy of UID ${uid} to ${destinationMailbox} was not confirmed by the server; the original was left untouched.`
+        );
+      }
+      await this.expungeOne(client, uid, () =>
+        `Message was copied to ${destinationMailbox} (UID ${newUid}) but the original could not be removed from ${sourceMailbox}; it is now in both folders.`
+      );
+      return { newUid };
+    } finally {
+      lock.release();
+    }
+  }
+
+  /**
+   * "Delete" = move to Trash. Refuses for messages already in Trash:
+   * nothing is ever removed from Trash itself.
+   */
+  async moveToTrash(
+    mailbox: string,
+    uid: number,
+    trashFolder?: string
+  ): Promise<string> {
+    const trash = trashFolder ?? (await this.findTrashFolder());
+    if (mailbox === trash) {
+      throw new Error(
+        `Message is already in ${trash}. Removing messages from Trash is not supported by this connector.`
+      );
+    }
+    await this.moveMessage(mailbox, uid, trash);
+    return trash;
+  }
+
+  async findTrashFolder(): Promise<string> {
+    const client = await this.ensureConnected();
+    const list = await client.list();
+    const trash = list.find((m) => m.specialUse === "\\Trash");
+    if (!trash) {
+      throw new Error("No \\Trash folder found. Set mail.trashFolder in accounts.json.");
+    }
+    return trash.path;
+  }
+
+  /**
+   * Replace a draft: APPEND the new version, then remove the old one.
+   * The old message must live in the Drafts folder and carry \Draft, and
+   * it is removed only after the server confirms the new draft's UID.
+   */
+  async replaceDraft(
+    draftsFolder: string,
+    oldUid: number,
+    raw: Buffer
+  ): Promise<number> {
+    assertUid(oldUid);
+    const client = await this.ensureConnected();
+    if (!client.capabilities.has("UIDPLUS")) {
+      throw new Error("IMAP server lacks UIDPLUS; refusing to replace drafts.");
+    }
+    const lock = await client.getMailboxLock(draftsFolder);
+    try {
+      const old = await client.fetchOne(`${oldUid}`, { flags: true }, { uid: true });
+      if (!old) {
+        throw new Error(`Draft UID ${oldUid} not found in ${draftsFolder}.`);
+      }
+      if (!old.flags || !old.flags.has("\\Draft")) {
+        throw new Error(`UID ${oldUid} in ${draftsFolder} is not marked \\Draft; refusing to replace it.`);
+      }
+      const res = await client.append(draftsFolder, raw, ["\\Draft", "\\Seen"]);
+      const newUid = res && typeof res.uid === "number" ? res.uid : undefined;
+      if (!newUid) {
+        throw new Error(
+          "The new draft was saved but the server did not confirm its UID; the old draft was left in place."
+        );
+      }
+      await this.expungeOne(client, oldUid, () =>
+        `New draft saved (UID ${newUid}) but the old draft UID ${oldUid} could not be removed; both versions are in ${draftsFolder}.`
+      );
+      return newUid;
+    } finally {
+      lock.release();
+    }
+  }
+
+  /**
+   * The only place this connector removes a message from a folder:
+   * \Deleted + "UID EXPUNGE <uid>" for exactly one UID, in the currently
+   * selected (locked) mailbox. Callers invoke it only after the message
+   * exists elsewhere (confirmed COPYUID) or has been superseded by a
+   * confirmed newer draft. A plain EXPUNGE would also purge other \Deleted
+   * messages, so without UIDPLUS this refuses.
+   */
+  private async expungeOne(
+    client: ImapFlow,
+    uid: number,
+    failure: () => string
+  ): Promise<void> {
+    assertUid(uid);
+    if (!client.capabilities.has("UIDPLUS")) {
+      throw new Error("UIDPLUS missing; refusing to expunge.");
+    }
+    // With UIDPLUS and uid:true, imapflow sends "UID EXPUNGE <uid>".
+    const removed = await client.messageDelete(`${uid}`, { uid: true });
+    if (!removed) throw new Error(failure());
   }
 
   private async fetchRange(
@@ -353,4 +508,10 @@ function summarize(msg: FetchMessageObject): MessageSummary {
     size: (msg.size as number | undefined) ?? null,
     preview,
   };
+}
+
+function assertUid(uid: number): void {
+  if (!Number.isSafeInteger(uid) || uid <= 0) {
+    throw new Error("uid must be a positive integer");
+  }
 }

@@ -2,6 +2,15 @@
 
 All notable changes are documented here. This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.4.0]
+
+### Added
+- `move_message` (including restoring from Trash), `move_to_trash` and `update_draft`.
+- Without IMAP `MOVE` (iCloud) a move is `UID COPY` → confirmed `COPYUID` → `\Deleted` + `UID EXPUNGE` of that single UID (RFC 6851 §3.3). `update_draft` is `APPEND` → confirmed `APPENDUID` → `UID EXPUNGE` of the old draft, only inside Drafts and only for `\Draft` messages.
+- All removal goes through one guarded function; servers without `UIDPLUS` are refused, plain `EXPUNGE` is never sent, and messages already in Trash cannot be removed.
+- `create_draft` now returns the new draft's UID.
+- Tests for every write path against a fake IMAP server.
+
 ## [0.3.1]
 
 ### Removed

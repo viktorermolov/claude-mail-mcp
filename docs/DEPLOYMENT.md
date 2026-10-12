@@ -79,4 +79,4 @@ docker compose --profile tunnel up -d
 curl -s -o /dev/null -w '%{http_code}\n' -X POST https://mail.example.com/mcp   # 401/403
 ```
 
-Then in claude.ai: Settings → Connectors → Add custom connector → `https://mail.example.com/mcp`. The OAuth login opens the Access page; after login the eight tools appear.
+Then in claude.ai: Settings → Connectors → Add custom connector → `https://mail.example.com/mcp`. The OAuth login opens the Access page; after login the eleven tools appear.

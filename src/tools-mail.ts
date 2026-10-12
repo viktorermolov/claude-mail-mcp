@@ -6,8 +6,8 @@
  * lazy-instantiates IMAP/SMTP clients per account.
  *
  * This fork has no send tool and no SMTP code: the connector can read,
- * search, flag and write drafts (IMAP APPEND). Nothing here can send,
- * move or delete a message.
+ * search, flag, write and update drafts, move messages and move them to
+ * Trash. Nothing here can send a message or remove one from Trash.
  *
  * Every tool carries MCP annotations so clients can auto-approve reads.
  */
@@ -213,12 +213,52 @@ export function registerMailTools(
         inReplyTo: args.in_reply_to,
         references: args.references,
       });
-      await imap.append(draftsFolder, raw, ["\\Draft", "\\Seen"]);
+      const uid = await imap.append(draftsFolder, raw, ["\\Draft", "\\Seen"]);
       return asJson({
         success: true,
         folder: draftsFolder,
+        uid: uid ?? null,
         bytes: raw.length,
       });
+    }
+  );
+
+  server.registerTool(
+    "update_draft",
+    {
+      description:
+        "Replace an existing draft in the Drafts folder with a new version (IMAP has no in-place edit). The new draft is saved first; the old one is removed only after the server confirms the new one. Only messages marked \\Draft in the Drafts folder can be replaced. Does NOT send.",
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+      inputSchema: {
+        uid: z.number().int().positive().describe("UID of the existing draft in the Drafts folder"),
+        to: recipientSchema,
+        subject: z.string().min(1),
+        text: z.string().optional(),
+        html: z.string().optional(),
+        cc: recipientSchema.optional(),
+        bcc: recipientSchema.optional(),
+        in_reply_to: z.string().optional(),
+        references: z.array(z.string()).optional(),
+        account: accountSchema,
+      },
+    },
+    async (args) => {
+      if (!args.text && !args.html) {
+        throw new Error("Provide at least one of `text` or `html`.");
+      }
+      const { imap, sender, draftsFolder } = pool.for(args.account);
+      const raw = await buildDraftSource(sender, {
+        to: args.to,
+        cc: args.cc,
+        bcc: args.bcc,
+        subject: args.subject,
+        text: args.text,
+        html: args.html,
+        inReplyTo: args.in_reply_to,
+        references: args.references,
+      });
+      const newUid = await imap.replaceDraft(draftsFolder, args.uid, raw);
+      return asJson({ success: true, folder: draftsFolder, old_uid: args.uid, new_uid: newUid });
     }
   );
 
@@ -262,4 +302,43 @@ export function registerMailTools(
     }
   );
 
+
+  server.registerTool(
+    "move_message",
+    {
+      description:
+        "Move a message to another folder (e.g. Inbox → Archive, or back out of Trash to restore it). WRITE OPERATION, reversible by moving it back.",
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+      inputSchema: {
+        source_mailbox: z.string(),
+        uid: z.number().int().positive(),
+        destination_mailbox: z.string(),
+        account: accountSchema,
+      },
+    },
+    async ({ source_mailbox, uid, destination_mailbox, account }) => {
+      const { imap } = pool.for(account);
+      const { newUid } = await imap.moveMessage(source_mailbox, uid, destination_mailbox);
+      return asJson({ success: true, from: source_mailbox, to: destination_mailbox, uid, new_uid: newUid ?? null });
+    }
+  );
+
+  server.registerTool(
+    "move_to_trash",
+    {
+      description:
+        "Delete a message by moving it to the Trash folder. Reversible: move_message can restore it from Trash. Messages already in Trash cannot be removed by this connector.",
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
+      inputSchema: {
+        mailbox: z.string(),
+        uid: z.number().int().positive(),
+        account: accountSchema,
+      },
+    },
+    async ({ mailbox, uid, account }) => {
+      const { imap, trashFolder } = pool.for(account);
+      const trash = await imap.moveToTrash(mailbox, uid, trashFolder);
+      return asJson({ success: true, from: mailbox, to: trash, uid });
+    }
+  );
 }

@@ -17,12 +17,12 @@
  *         "label": "iCloud",
  *         "default": true,
  *         "imap": { "host": "imap.mail.me.com", "port": 993, "user": "...", "pass": "...", "tls": true },
- *         "mail": { "defaultFrom": "...", "draftsFolder": "Drafts" }
+ *         "mail": { "defaultFrom": "...", "draftsFolder": "Drafts", "trashFolder": "Deleted Messages" }
  *       }
  *     ]
  *   }
  *
- * Unknown keys (e.g. a leftover "smtp" block or "trashFolder") are ignored.
+ * Unknown keys (e.g. a leftover "smtp" block) are ignored.
  *
  * Storage security: the file must be readable only by the service user
  * (chmod 600). No app-level encryption — filesystem perms + systemd
@@ -45,6 +45,8 @@ export interface MailDefaults {
   defaultFrom: string;
   defaultFromName?: string;
   draftsFolder: string;
+  /** Explicit Trash folder; when omitted the \Trash special-use folder is used. */
+  trashFolder?: string;
 }
 
 export interface Account {
@@ -296,6 +298,7 @@ function parseMail(raw: unknown, where: string): MailDefaults {
     defaultFrom: expectStr(o.defaultFrom, `${where}.defaultFrom`),
     defaultFromName: typeof o.defaultFromName === "string" ? o.defaultFromName : undefined,
     draftsFolder: typeof o.draftsFolder === "string" && o.draftsFolder.length > 0 ? o.draftsFolder : "Drafts",
+    trashFolder: typeof o.trashFolder === "string" && o.trashFolder.length > 0 ? o.trashFolder : undefined,
   };
 }
 
