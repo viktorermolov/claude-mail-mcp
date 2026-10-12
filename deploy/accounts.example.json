@@ -14,7 +14,8 @@
       },
       "mail": {
         "defaultFrom": "you@icloud.com",
-        "draftsFolder": "Drafts"
+        "draftsFolder": "Drafts",
+        "trashFolder": "Deleted Messages"
       }
     }
   ]

@@ -14,6 +14,7 @@ import { ClientPool } from "../src/client-pool.js";
 import { accessAuth } from "../src/access-auth.js";
 import { buildMcpServer, createApp } from "../src/app.js";
 import { buildDraftSource } from "../src/draft-composer.js";
+import { ImapClient } from "../src/imap-client.js";
 
 const TEAM = "example.cloudflareaccess.com";
 const ISS = `https://${TEAM}`;
@@ -27,8 +28,11 @@ const EXPECTED_TOOLS = [
   "list_folders",
   "list_messages",
   "mark_read",
+  "move_message",
+  "move_to_trash",
   "search_messages",
   "set_flagged",
+  "update_draft",
 ];
 
 let dir: string;
@@ -108,7 +112,7 @@ async function callMcp(headers: Record<string, string>): Promise<Response> {
   });
 }
 
-test("registered tools are exactly the allowed set — no send, move or delete", async () => {
+test("registered tools are exactly the allowed set — no send, no permanent delete", async () => {
   const mcp = buildMcpServer(pool, store);
   const [a, b] = InMemoryTransport.createLinkedPair();
   await mcp.connect(a);
@@ -117,20 +121,25 @@ test("registered tools are exactly the allowed set — no send, move or delete",
   const { tools } = await client.listTools();
   const names = tools.map((t) => t.name).sort();
   assert.deepEqual(names, EXPECTED_TOOLS);
-  for (const n of names) assert.doesNotMatch(n, /send|expunge|delete|trash|move|calendar|event/);
+  for (const n of names) assert.doesNotMatch(n, /send|expunge|delete|purge|empty|calendar|event/);
   const reads = tools.filter((t) => t.annotations?.readOnlyHint).map((t) => t.name).sort();
   assert.deepEqual(reads, ["get_message", "list_accounts", "list_folders", "list_messages", "search_messages"]);
   await client.close();
 });
 
-test("source contains no SMTP transport, send, move, copy or expunge calls", async () => {
+test("source has no SMTP/send code and exactly one guarded expunge site", async () => {
   const srcDir = path.join(import.meta.dirname, "..", "src");
+  let deleteSites = 0;
   for (const f of await readdir(srcDir)) {
     const code = await readFile(path.join(srcDir, f), "utf8");
-    for (const banned of [/createTransport/, /sendMail/, /messageDelete/, /messageMove/, /messageCopy/, /\.expunge\(/i, /EXPUNGE"/, /smtp-transport/, /tsdav/]) {
+    for (const banned of [/createTransport/, /sendMail/, /\.expunge\(/i, /exec\(\s*["'`](UID )?EXPUNGE/i, /smtp-transport/, /tsdav/, /mailboxDelete/]) {
       assert.doesNotMatch(code, banned, `${f} matches ${banned}`);
     }
+    const sites = code.match(/messageDelete\(/g)?.length ?? 0;
+    if (sites) assert.equal(f, "imap-client.ts", `messageDelete used in ${f}`);
+    deleteSites += sites;
   }
+  assert.equal(deleteSites, 1, "messageDelete must appear exactly once (expungeOne)");
 });
 
 test("list_accounts never returns credentials", async () => {
@@ -219,4 +228,145 @@ test("parse errors never echo the file contents", () => {
     () => parseAccountsFile('{"version":1,"accounts":[{"imap":{"pass":"SECRET-PASS"'),
     (e: Error) => !e.message.includes("SECRET")
   );
+});
+
+// ---- IMAP write paths against a fake server -------------------------------
+
+type Call = [string, ...unknown[]];
+
+function fakeImap(opts: {
+  caps: string[];
+  copyUidMap?: Map<number, number> | null;
+  deleteOk?: boolean;
+  draftFlags?: string[] | null;
+  appendUid?: number | null;
+  trashPath?: string;
+}) {
+  const calls: Call[] = [];
+  const client = {
+    usable: true,
+    capabilities: new Map(opts.caps.map((c) => [c, true])),
+    getMailboxLock: async (box: string) => {
+      calls.push(["lock", box]);
+      return { release() {} };
+    },
+    messageMove: async (range: string, dest: string) => {
+      calls.push(["move", range, dest]);
+      return { uidMap: new Map([[Number(range), 900]]) };
+    },
+    messageCopy: async (range: string, dest: string) => {
+      calls.push(["copy", range, dest]);
+      return opts.copyUidMap === null ? { path: "x", destination: dest } : { path: "x", destination: dest, uidMap: opts.copyUidMap ?? new Map([[Number(range), 77]]) };
+    },
+    messageDelete: async (range: string, o: unknown) => {
+      calls.push(["delete", range, o]);
+      return opts.deleteOk ?? true;
+    },
+    fetchOne: async (range: string) => {
+      calls.push(["fetchOne", range]);
+      return opts.draftFlags === null ? false : { uid: Number(range), flags: new Set(opts.draftFlags ?? ["\\Draft"]) };
+    },
+    append: async (box: string) => {
+      calls.push(["append", box]);
+      return opts.appendUid === null ? { destination: box } : { destination: box, uid: opts.appendUid ?? 501 };
+    },
+    list: async () => [{ path: "INBOX" }, { path: opts.trashPath ?? "Deleted Messages", specialUse: "\\Trash" }],
+  };
+  const imap = new ImapClient({ host: "x", port: 993, user: "u", pass: "p", secure: true });
+  (imap as unknown as { client: unknown }).client = client;
+  return { imap, calls };
+}
+
+const ops = (calls: Call[]) => calls.map((c) => c[0]);
+
+test("move: uses MOVE when the server has it", async () => {
+  const { imap, calls } = fakeImap({ caps: ["MOVE", "UIDPLUS"] });
+  await imap.moveMessage("INBOX", 5, "Archive");
+  assert.deepEqual(ops(calls), ["lock", "move"]);
+});
+
+test("move without MOVE: copy, confirmed COPYUID, then UID EXPUNGE of that one UID", async () => {
+  const { imap, calls } = fakeImap({ caps: ["UIDPLUS"] });
+  const r = await imap.moveMessage("INBOX", 5, "Archive");
+  assert.equal(r.newUid, 77);
+  assert.deepEqual(ops(calls), ["lock", "copy", "delete"]);
+  assert.deepEqual(calls[2], ["delete", "5", { uid: true }]);
+});
+
+test("move without MOVE: no COPYUID → original untouched", async () => {
+  const { imap, calls } = fakeImap({ caps: ["UIDPLUS"], copyUidMap: null });
+  await assert.rejects(imap.moveMessage("INBOX", 5, "Archive"), /not confirmed.*left untouched/);
+  assert.ok(!ops(calls).includes("delete"));
+});
+
+test("move without MOVE: COPYUID for a different UID → original untouched", async () => {
+  const { imap, calls } = fakeImap({ caps: ["UIDPLUS"], copyUidMap: new Map([[6, 77]]) });
+  await assert.rejects(imap.moveMessage("INBOX", 5, "Archive"), /not confirmed/);
+  assert.ok(!ops(calls).includes("delete"));
+});
+
+test("move: neither MOVE nor UIDPLUS → refuse before any command", async () => {
+  const { imap, calls } = fakeImap({ caps: ["IMAP4rev1"] });
+  await assert.rejects(imap.moveMessage("INBOX", 5, "Archive"), /neither MOVE nor UIDPLUS/);
+  assert.deepEqual(calls, []);
+});
+
+test("move: failed expunge reports the message is in both folders", async () => {
+  const { imap } = fakeImap({ caps: ["UIDPLUS"], deleteOk: false });
+  await assert.rejects(imap.moveMessage("INBOX", 5, "Archive"), /now in both folders/);
+});
+
+test("move: invalid uid and same folder are refused", async () => {
+  const { imap, calls } = fakeImap({ caps: ["UIDPLUS"] });
+  await assert.rejects(imap.moveMessage("INBOX", 0, "Archive"), /positive integer/);
+  await assert.rejects(imap.moveMessage("INBOX", 5, "INBOX"), /same/);
+  assert.deepEqual(calls, []);
+});
+
+test("trash: moves to the \\Trash folder", async () => {
+  const { imap, calls } = fakeImap({ caps: ["UIDPLUS"] });
+  assert.equal(await imap.moveToTrash("INBOX", 5), "Deleted Messages");
+  assert.deepEqual(calls.find((c) => c[0] === "copy"), ["copy", "5", "Deleted Messages"]);
+});
+
+test("trash: nothing is ever removed from Trash itself", async () => {
+  const { imap, calls } = fakeImap({ caps: ["UIDPLUS"] });
+  await assert.rejects(imap.moveToTrash("Deleted Messages", 5), /already in Deleted Messages/);
+  assert.ok(!ops(calls).includes("delete"));
+});
+
+test("restore: moving out of Trash is allowed", async () => {
+  const { imap, calls } = fakeImap({ caps: ["UIDPLUS"] });
+  await imap.moveMessage("Deleted Messages", 5, "INBOX");
+  assert.deepEqual(ops(calls), ["lock", "copy", "delete"]);
+});
+
+test("update_draft: append new, confirmed UID, then remove the old draft", async () => {
+  const { imap, calls } = fakeImap({ caps: ["UIDPLUS"] });
+  const newUid = await imap.replaceDraft("Drafts", 139, Buffer.from("x"));
+  assert.equal(newUid, 501);
+  assert.deepEqual(ops(calls), ["lock", "fetchOne", "append", "delete"]);
+  assert.deepEqual(calls[0], ["lock", "Drafts"]);
+  assert.deepEqual(calls[3], ["delete", "139", { uid: true }]);
+});
+
+test("update_draft: refuses messages without \\Draft", async () => {
+  const { imap, calls } = fakeImap({ caps: ["UIDPLUS"], draftFlags: ["\\Seen"] });
+  await assert.rejects(imap.replaceDraft("Drafts", 139, Buffer.from("x")), /not marked/);
+  assert.ok(!ops(calls).includes("append") && !ops(calls).includes("delete"));
+});
+
+test("update_draft: no APPENDUID → old draft kept", async () => {
+  const { imap, calls } = fakeImap({ caps: ["UIDPLUS"], appendUid: null });
+  await assert.rejects(imap.replaceDraft("Drafts", 139, Buffer.from("x")), /old draft was left in place/);
+  assert.ok(!ops(calls).includes("delete"));
+});
+
+test("update_draft: missing draft or no UIDPLUS → nothing changes", async () => {
+  const a = fakeImap({ caps: ["UIDPLUS"], draftFlags: null });
+  await assert.rejects(a.imap.replaceDraft("Drafts", 139, Buffer.from("x")), /not found/);
+  assert.ok(!ops(a.calls).includes("append"));
+  const b = fakeImap({ caps: ["MOVE"] });
+  await assert.rejects(b.imap.replaceDraft("Drafts", 139, Buffer.from("x")), /UIDPLUS/);
+  assert.deepEqual(b.calls, []);
 });
