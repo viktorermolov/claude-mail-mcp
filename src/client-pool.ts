@@ -15,7 +15,6 @@ interface AccountClients {
   imap: ImapClient;
   sender: DraftSender;
   draftsFolder: string;
-  trashFolder?: string;
 }
 
 export class ClientPool {
@@ -69,7 +68,6 @@ export class ClientPool {
         fromName: account.mail.defaultFromName || undefined,
       },
       draftsFolder: account.mail.draftsFolder,
-      trashFolder: account.mail.trashFolder,
     };
   }
 }

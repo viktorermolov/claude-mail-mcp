@@ -6,8 +6,9 @@
  * collide on the IMAP `SELECT` state.
  *
  * Read paths open the mailbox with EXAMINE (read-only), so listing or
- * reading never changes flags. Write paths are limited to flag changes,
- * MOVE and APPEND — nothing in this file sets \Deleted or EXPUNGEs.
+ * reading never changes flags. Write paths are limited to flag changes
+ * and APPEND (drafts) — nothing in this file moves, sets \Deleted or
+ * EXPUNGEs.
  *
  * Tool handlers stay thin: they call high-level methods here, get back
  * plain JSON-shaped objects, and don't see imapflow internals.
@@ -254,69 +255,6 @@ export class ImapClient {
     flagged: boolean
   ): Promise<void> {
     await this.setFlag(mailbox, uid, "\\Flagged", flagged);
-  }
-
-  /**
-   * Move a message with IMAP MOVE (RFC 6851). imapflow silently falls back
-   * to COPY + \Deleted + EXPUNGE when the server lacks MOVE; we refuse
-   * instead, because this connector must never expunge anything.
-   */
-  async moveMessage(
-    sourceMailbox: string,
-    uid: number,
-    destinationMailbox: string
-  ): Promise<void> {
-    const client = await this.ensureConnected();
-    if (!client.capabilities.has("MOVE")) {
-      throw new Error(
-        "IMAP server does not support MOVE; refusing to fall back to COPY+EXPUNGE."
-      );
-    }
-    if (sourceMailbox === destinationMailbox) {
-      throw new Error("Source and destination mailbox are the same.");
-    }
-    const lock = await client.getMailboxLock(sourceMailbox);
-    try {
-      const result = await client.messageMove(`${uid}`, destinationMailbox, {
-        uid: true,
-      });
-      if (!result) {
-        throw new Error(`Message UID ${uid} not found in ${sourceMailbox}`);
-      }
-    } finally {
-      lock.release();
-    }
-  }
-
-  /**
-   * "Delete" = move to Trash. There is deliberately no method that sets
-   * \Deleted or issues EXPUNGE.
-   */
-  async moveToTrash(
-    mailbox: string,
-    uid: number,
-    trashFolder?: string
-  ): Promise<string> {
-    const trash = trashFolder ?? (await this.findTrashFolder());
-    if (mailbox === trash) {
-      throw new Error(
-        `Message is already in ${trash}. Permanent deletion is not supported by this connector.`
-      );
-    }
-    await this.moveMessage(mailbox, uid, trash);
-    return trash;
-  }
-
-  private async findTrashFolder(): Promise<string> {
-    const client = await this.ensureConnected();
-    const list = await client.list();
-    const trash = list.find((m) => m.specialUse === "\\Trash");
-    if (!trash) {
-      throw new Error(
-        "No \\Trash folder found. Set mail.trashFolder in accounts.json."
-      );
-    }
-    return trash.path;
   }
 
   private async setFlag(

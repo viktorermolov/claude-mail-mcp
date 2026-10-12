@@ -14,7 +14,6 @@ import { ClientPool } from "../src/client-pool.js";
 import { accessAuth } from "../src/access-auth.js";
 import { buildMcpServer, createApp } from "../src/app.js";
 import { buildDraftSource } from "../src/draft-composer.js";
-import { ImapClient } from "../src/imap-client.js";
 
 const TEAM = "example.cloudflareaccess.com";
 const ISS = `https://${TEAM}`;
@@ -28,8 +27,6 @@ const EXPECTED_TOOLS = [
   "list_folders",
   "list_messages",
   "mark_read",
-  "move_message",
-  "move_to_trash",
   "search_messages",
   "set_flagged",
 ];
@@ -111,7 +108,7 @@ async function callMcp(headers: Record<string, string>): Promise<Response> {
   });
 }
 
-test("registered tools are exactly the allowed set — no send, no expunge", async () => {
+test("registered tools are exactly the allowed set — no send, move or delete", async () => {
   const mcp = buildMcpServer(pool, store);
   const [a, b] = InMemoryTransport.createLinkedPair();
   await mcp.connect(a);
@@ -120,17 +117,17 @@ test("registered tools are exactly the allowed set — no send, no expunge", asy
   const { tools } = await client.listTools();
   const names = tools.map((t) => t.name).sort();
   assert.deepEqual(names, EXPECTED_TOOLS);
-  for (const n of names) assert.doesNotMatch(n, /send|expunge|delete|calendar|event/);
+  for (const n of names) assert.doesNotMatch(n, /send|expunge|delete|trash|move|calendar|event/);
   const reads = tools.filter((t) => t.annotations?.readOnlyHint).map((t) => t.name).sort();
   assert.deepEqual(reads, ["get_message", "list_accounts", "list_folders", "list_messages", "search_messages"]);
   await client.close();
 });
 
-test("source contains no SMTP transport, send or expunge calls", async () => {
+test("source contains no SMTP transport, send, move, copy or expunge calls", async () => {
   const srcDir = path.join(import.meta.dirname, "..", "src");
   for (const f of await readdir(srcDir)) {
     const code = await readFile(path.join(srcDir, f), "utf8");
-    for (const banned of [/createTransport/, /sendMail/, /messageDelete/, /\.expunge\(/i, /smtp-transport/, /tsdav/]) {
+    for (const banned of [/createTransport/, /sendMail/, /messageDelete/, /messageMove/, /messageCopy/, /\.expunge\(/i, /EXPUNGE"/, /smtp-transport/, /tsdav/]) {
       assert.doesNotMatch(code, banned, `${f} matches ${banned}`);
     }
   }
@@ -222,30 +219,4 @@ test("parse errors never echo the file contents", () => {
     () => parseAccountsFile('{"version":1,"accounts":[{"imap":{"pass":"SECRET-PASS"'),
     (e: Error) => !e.message.includes("SECRET")
   );
-});
-
-test("move refuses to fall back to COPY+EXPUNGE without MOVE capability", async () => {
-  const imap = new ImapClient({ host: "x", port: 993, user: "u", pass: "p", secure: true });
-  let moved = false;
-  const fake = {
-    usable: true,
-    capabilities: new Map([["IMAP4rev1", true]]),
-    getMailboxLock: async () => ({ release() {} }),
-    messageMove: async () => {
-      moved = true;
-      return true;
-    },
-  };
-  (imap as unknown as { client: unknown }).client = fake;
-  await assert.rejects(imap.moveMessage("INBOX", 1, "Archive"), /does not support MOVE/);
-  assert.equal(moved, false);
-});
-
-test("move_to_trash refuses on a message already in Trash", async () => {
-  const imap = new ImapClient({ host: "x", port: 993, user: "u", pass: "p", secure: true });
-  (imap as unknown as { client: unknown }).client = {
-    usable: true,
-    capabilities: new Map([["MOVE", true]]),
-  };
-  await assert.rejects(imap.moveToTrash("Deleted Messages", 1, "Deleted Messages"), /Permanent deletion is not supported/);
 });

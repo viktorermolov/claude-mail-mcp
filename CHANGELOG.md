@@ -2,6 +2,11 @@
 
 All notable changes are documented here. This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.3.1]
+
+### Removed
+- `move_message` and `move_to_trash`: iCloud IMAP has no `MOVE`, and the connector must not EXPUNGE, so both tools could never succeed there. `mail.trashFolder` is no longer read.
+
 ## [0.3.0] — fork: safe IMAP-only connector
 
 ### Removed
