@@ -5,7 +5,7 @@ Self-hosted **IMAP connector for Claude**: a Streamable HTTP MCP server that let
 What this fork deliberately **cannot** do:
 
 - **Send mail.** There is no send tool and no SMTP code or SMTP credentials. Replies are written as drafts; you send them from your own mail client.
-- **Permanently delete.** Nothing sets `\Deleted` or issues `EXPUNGE`. "Delete" moves a message to Trash, and moves refuse to run on servers without IMAP `MOVE` (instead of silently falling back to COPY + EXPUNGE).
+- **Move or delete.** Nothing moves, copies, sets `\Deleted` or issues `EXPUNGE`. iCloud has no IMAP `MOVE`, and a COPY + EXPUNGE fallback was deliberately left out.
 - **Touch calendars or contacts.** CalDAV support is removed.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE) [![Node](https://img.shields.io/badge/node-%3E=20-brightgreen.svg)](https://nodejs.org)
@@ -24,8 +24,6 @@ What this fork deliberately **cannot** do:
 | `create_draft` | Compose locally and APPEND to Drafts | yes |
 | `mark_read` | Set / clear `\Seen` | yes, reversible |
 | `set_flagged` | Set / clear `\Flagged` | yes, reversible |
-| `move_message` | Move between folders (IMAP `MOVE` only) | yes, reversible |
-| `move_to_trash` | Move to Trash | yes, reversible |
 
 Read tools open the folder with `EXAMINE`, so reading never marks mail as read. Every tool carries MCP annotations (`readOnlyHint` / `destructiveHint`).
 
@@ -46,7 +44,7 @@ Deployment with Docker Compose and a locally-managed tunnel: [docs/DEPLOYMENT.md
 
 ```bash
 npm ci
-npm test        # tool list, auth, no-send / no-expunge guarantees
+npm test        # tool list, auth, no-send / no-move / no-expunge guarantees
 npm run build
 ```
 
@@ -54,7 +52,7 @@ npm run build
 
 - IMAP: `imap.mail.me.com:993`, TLS. User: your Apple ID e-mail (or the @icloud.com address).
 - Password: an app-specific password from <https://account.apple.com> → Sign-In and Security → App-Specific Passwords.
-- Trash is called `Deleted Messages`; Drafts is `Drafts`.
+- Drafts is `Drafts`. iCloud IMAP advertises `UIDPLUS` but not `MOVE`.
 
 ## License
 

@@ -6,8 +6,8 @@
  * lazy-instantiates IMAP/SMTP clients per account.
  *
  * This fork has no send tool and no SMTP code: the connector can read,
- * search, file, flag, write drafts (IMAP APPEND) and move messages to
- * Trash. Nothing here can send a message or permanently delete one.
+ * search, flag and write drafts (IMAP APPEND). Nothing here can send,
+ * move or delete a message.
  *
  * Every tool carries MCP annotations so clients can auto-approve reads.
  */
@@ -243,31 +243,6 @@ export function registerMailTools(
   );
 
   server.registerTool(
-    "move_message",
-    {
-      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
-      description:
-        "Move a message from one mailbox to another (e.g. Inbox → Archive). WRITE OPERATION, reversible by moving it back.",
-      inputSchema: {
-        source_mailbox: z.string(),
-        uid: z.number().int().positive(),
-        destination_mailbox: z.string(),
-        account: accountSchema,
-      },
-    },
-    async ({ source_mailbox, uid, destination_mailbox, account }) => {
-      const { imap } = pool.for(account);
-      await imap.moveMessage(source_mailbox, uid, destination_mailbox);
-      return asJson({
-        success: true,
-        from: source_mailbox,
-        to: destination_mailbox,
-        uid,
-      });
-    }
-  );
-
-  server.registerTool(
     "set_flagged",
     {
       description:
@@ -287,22 +262,4 @@ export function registerMailTools(
     }
   );
 
-  server.registerTool(
-    "move_to_trash",
-    {
-      description:
-        "Delete a message by moving it to the Trash folder. Reversible: the user can restore it from Trash. Permanent deletion is not available in this connector.",
-      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
-      inputSchema: {
-        mailbox: z.string(),
-        uid: z.number().int().positive(),
-        account: accountSchema,
-      },
-    },
-    async ({ mailbox, uid, account }) => {
-      const { imap, trashFolder } = pool.for(account);
-      const trash = await imap.moveToTrash(mailbox, uid, trashFolder);
-      return asJson({ success: true, from: mailbox, to: trash, uid });
-    }
-  );
 }
