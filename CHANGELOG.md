@@ -2,6 +2,13 @@
 
 All notable changes are documented here. This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.7.1]
+
+### Security
+- cloudflared 2026.10.4: versions before 2026.10.2 still trust eight eMudhra (emSign) intermediate certificates with weak private keys; 2026.10.4 also allowlists debug endpoints on the metrics server (VULN-176088).
+- zod 4.6.7 (GHSA-mrhx-c7xc-m3w5: memory exhaustion while validating large arrays; no fix exists for zod 3). Tool schemas are unchanged.
+- body-parser 2.4.0 (GHSA-27r3-jxmh-p828; the server already parses bodies with `inflate: false`), fast-uri 3.1.9 (URI spoofing advisories), plus patch updates of mailparser, nodemailer (MIME helpers only — there is no sending code), qs and iconv-lite.
+
 ## [0.7.0]
 
 ### Added

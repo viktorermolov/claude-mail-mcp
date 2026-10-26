@@ -14,7 +14,7 @@ import { ClientPool } from "./client-pool.js";
 import { registerMailTools, UNTRUSTED_NOTE } from "./tools-mail.js";
 import { registerCalendarTools, CALENDAR_UNTRUSTED_NOTE } from "./tools-calendar.js";
 
-export const VERSION = "0.7.0";
+export const VERSION = "0.7.1";
 
 export type Logger = (
   level: "debug" | "info" | "warn" | "error",
