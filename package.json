@@ -1,6 +1,6 @@
 {
   "name": "claude-mail-mcp",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "Self-hosted IMAP-only MCP connector for Claude: read, search, text drafts, move, flags, trash — no sending, no permanent deletion. Auth via Cloudflare Access Managed OAuth.",
   "license": "MIT",
   "author": "Viktor Ermolov (fork)",
@@ -57,7 +57,7 @@
     "libqp": "^2.1.2",
     "mailparser": "^3.7.2",
     "nodemailer": "^10.1.0",
-    "zod": "^3.23.8"
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@types/express": "^5.0.0",
